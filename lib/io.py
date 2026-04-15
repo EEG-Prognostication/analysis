@@ -117,7 +117,25 @@ def align_stimulus_csv(
     sfreq: float,
     n_times: int,
 ) -> tuple[pd.DataFrame, float]:
-    """Load the stimulus CSV and align event times into EDF sample space."""
+    """Load the stimulus CSV and align event times into EDF sample space.
+
+    Requires two rows to be present in the CSV:
+      - ``stim_type == 'manual_sync_pulse'``: written by stimulus_software during the session
+        when the clinician sends the sync pulse; ``start_time`` is the DAC wall-clock time of
+        the pulse onset.
+      - ``stim_type == 'sync_detection'``: records the EDF time (seconds from EDF start) at
+        which the sync pulse was detected on the DC audio channel. This row is written
+        *after* the session — it is not part of the live recording. The primary source is
+        stimulus_software's EDF viewer (``lib/edf_viewer.py``): the clinician opens the EDF,
+        detects the sync pulse on the DC channel, and the viewer saves the row back to the CSV.
+        Other detection methods may produce this row too — as long as the format matches.
+        The ``notes`` field must contain ``csv_pulse_idx=<n>`` to identify which
+        ``manual_sync_pulse`` row to pair with (typically ``csv_pulse_idx=0``).
+
+    Returns:
+        df: DataFrame with added columns ``edf_start``, ``edf_end``, ``start_sample``, ``end_sample``
+        time_offset: scalar offset such that ``edf_time = csv_dac_time + time_offset``
+    """
     df = pd.read_csv(csv_path)
     df = df[df["stim_type"] != "stim_type"].copy()
     df["start_time"] = pd.to_numeric(df["start_time"], errors="coerce")
