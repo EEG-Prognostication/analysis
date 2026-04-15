@@ -1,0 +1,33 @@
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Analysis outputs
+results/
+*.png
+*.fif
+*.npy
+*.npz
+*.parquet
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
