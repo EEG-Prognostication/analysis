@@ -14,6 +14,7 @@ env/
 
 # Analysis outputs
 results/
+reports/
 *.png
 *.fif
 *.npy

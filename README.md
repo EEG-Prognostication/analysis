@@ -1,51 +1,49 @@
 # analysis
 
-EEG analysis notebooks for the Harborview bedside covert cognition assessment project.
-
-## Scope
-
-This repository is the working repo for analysis development.
-Treat `stimulus_software`, `awaken-ai`, and `eeg-analysis` as reference repos only unless a task explicitly requires syncing logic back from them.
+EEG analysis pipeline for bedside cognitive assessment.
 
 ## Setup
 
-Use the `stimulus_software/.venv` — it has MNE 1.11, scipy, pandas, and matplotlib.
+```bash
+cd analysis
+source .venv/bin/activate
+```
+
+## Batch runner
+
+`run_all.py` runs all missing analyses for every patient that has both an EDF and a CSV. Results are written to `results/<PatientID>/`.
 
 ```bash
-cd ../stimulus_software
-source .venv/bin/activate
-cd ../analysis
-jupyter notebook
+python run_all.py                               # all missing analyses
+python run_all.py --force                       # re-run even if outputs exist
+python run_all.py --patients CON012 CON015      # specific patients
+python run_all.py --analyses oddball language   # specific analyses
+```
+
+After running, regenerate PDF reports:
+
+```bash
+python generate_reports.py
 ```
 
 ## Notebooks
 
-Each notebook is self-contained. Set `SUBJECT_ID`, `SESSION_DATE`, and any filename overrides in the configuration cell and run.
-The oddball notebook now resolves paths relative to the repo so it can be reused on another machine without editing Joey-specific absolute paths.
-All notebooks now share the same EDF + sync alignment helpers from `analysis/lib/` and save outputs to `results/<SUBJECT_ID>/`.
+Each notebook is self-contained. Set `SUBJECT_ID` and `SESSION_DATE` in the configuration cell and run.
 
 | Notebook | Paradigm | Analysis | Positive finding |
 | --- | --- | --- | --- |
-| `language_itpc.ipynb` | Language | ITPC at 0.78 / 1.56 / 3.125 Hz + permutation test | Neural entrainment to speech rhythm |
-| `oddball_p300.ipynb` | Oddball | P300 ERP at 300–600 ms (Pz/Cz) + permutation test | Cognitive detection of deviant tone |
-| `command_following.ipynb` | Motor command | Mu/beta ERD at C3/C4 + paired t-test | Lateralized motor imagery response |
-| `voice_familiarity.ipynb` | Loved one voice | Familiarity ERP at 300–600 ms + permutation test | Implicit memory / emotional processing |
+| `oddball_p300_erp.ipynb` | Oddball | P300 ERP at 300–600 ms + permutation test | Cognitive detection of deviant tone |
+| `language_tracking_itpc.ipynb` | Language | ITPC at 0.78 / 1.56 / 3.125 Hz + permutation test | Neural entrainment to speech rhythm |
+| `command_following_erd_svm.ipynb` | Motor command | Mu/beta ERD at C3/C4 + SVM | Lateralized motor imagery response |
+| `voice_familiarity_erp.ipynb` | Loved one voice | Familiarity ERP at 300–600 ms + permutation test | Implicit memory / emotional processing |
 
-Requires a `manual_sync_pulse` + `sync_detection` row pair in the CSV for timestamp alignment. See notebook Section 3.
+Requires a `manual_sync_pulse` + `sync_detection` row pair in the CSV for timestamp alignment.
 
-## Current focus
+## Shared helpers
 
-- Start with `notebooks/oddball_p300.ipynb` for single-subject exploratory P300 work.
-- Use `awaken-ai/src/pipelines/p300_oddball.py` only as a reference implementation when notebook logic needs comparison against the production pipeline.
+- `lib/io.py` — path resolution, EDF loading, and CSV alignment
+- `lib/preprocessing.py` — bandpass/notch filter helpers
 
-## Shared Helpers
+## Source data
 
-- `lib/io.py` contains repo-relative path resolution, EDF metadata loading, and stimulus CSV alignment helpers.
-- `lib/preprocessing.py` contains shared EEG channel loading and standard filtering helpers.
-- `reports/` and `tests/` are scaffolded for future report builders and helper tests.
-
-## Related repos
-
-- [stimulus_software](../stimulus_software) — stimulus delivery and source data generation reference
-- [awaken-ai](../awaken-ai) — production offline pipeline reference
-- [eeg-analysis](../eeg-analysis) — predecessor research library reference
+EDF recordings and stimulus CSVs live in `stimulus_software/patient_data/` and are gitignored.
