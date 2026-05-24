@@ -6,6 +6,8 @@ Generates one PDF clinical report per EEG analysis paradigm, aggregating results
 from every patient found in the results directory. Deletes any existing report PDF
 before writing the new one.
 
+Uses fpdf2 for direct PNG embedding — no matplotlib rendering per page.
+
 Usage (from the analysis/ directory, with the venv active):
     python generate_reports.py
 """
@@ -15,11 +17,11 @@ import textwrap
 import datetime
 from pathlib import Path
 
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
-from matplotlib.backends.backend_pdf import PdfPages
+try:
+    from fpdf import FPDF
+except ImportError:
+    raise SystemExit("fpdf2 not installed — run: pip install fpdf2")
+from PIL import Image as _PIL
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 ANALYSIS_ROOT = Path(__file__).parent.resolve()
@@ -27,9 +29,10 @@ RESULTS_DIR   = ANALYSIS_ROOT / 'results'
 REPORTS_DIR   = ANALYSIS_ROOT / 'reports'
 REPORTS_DIR.mkdir(exist_ok=True)
 
-PAGE_W, PAGE_H = 8.5, 11.0   # letter, inches
-MARGIN = 0.75                 # left/right margin, inches
-GREY = '#888888'
+PAGE_W = 8.5    # letter, inches
+PAGE_H = 11.0
+MARGIN = 0.75
+TEXT_W = PAGE_W - 2 * MARGIN   # 7.0 in
 
 # ── Paradigm catalogue ─────────────────────────────────────────────────────────
 # Each entry defines the output PDF name, display titles, a plain-English overview
@@ -632,382 +635,291 @@ ANALYSES = {
 }
 
 
-# ── Rendering helpers ──────────────────────────────────────────────────────────
-def _wrap(text, width=90):
-    return textwrap.fill(text, width=width)
+# ── fpdf2 helpers ──────────────────────────────────────────────────────────────
+
+_CHAR_MAP = str.maketrans({
+    '–': '-',   # en dash
+    '—': '--',  # em dash
+    '‘': "'",   # left single quote
+    '’': "'",   # right single quote
+    '“': '"',   # left double quote
+    '”': '"',   # right double quote
+    '…': '...', # ellipsis
+})
+
+def _n(text: str) -> str:
+    """Normalise text to Latin-1 safe characters for built-in PDF fonts."""
+    return text.translate(_CHAR_MAP)
 
 
-def _place_image(fig, img_path, left_in, bottom_in, max_w_in, max_h_in):
-    """Add an image axes that preserves the image's aspect ratio."""
-    img = mpimg.imread(str(img_path))
-    h_px, w_px = img.shape[:2]
-    img_aspect = w_px / h_px  # > 1 means wider than tall
+def _make_pdf() -> FPDF:
+    p = FPDF(unit='in', format='letter')
+    p.set_auto_page_break(False)
+    p.set_margins(0, 0, 0)
+    return p
 
-    # Scale to fit within the available box, preserving aspect ratio
-    if max_w_in / max_h_in >= img_aspect:
-        # height is the limiting dimension
-        draw_h = max_h_in
-        draw_w = draw_h * img_aspect
+
+def _img_dims(path: Path) -> tuple:
+    """Read PNG header only; return (w_in, h_in)."""
+    with _PIL.open(path) as im:
+        w_px, h_px = im.size
+        dpi_info = im.info.get('dpi', (150, 150))
+        dpi = float(dpi_info[0]) if isinstance(dpi_info, (tuple, list)) else float(dpi_info or 150)
+        dpi = max(dpi, 1.0)
+    return w_px / dpi, h_px / dpi
+
+
+def _rule(p: FPDF, y: float) -> None:
+    p.set_draw_color(0, 0, 0)
+    p.set_line_width(0.008)
+    p.line(MARGIN, y, PAGE_W - MARGIN, y)
+
+
+def _txt(p: FPDF, x: float, y: float, text: str,
+         size: int = 10, style: str = '',
+         color: tuple = (0, 0, 0), align: str = 'L') -> float:
+    """Single line of text; returns line height used."""
+    p.set_font('Helvetica', style=style, size=size)
+    p.set_text_color(*color)
+    lh = size * 1.4 / 72
+    p.set_xy(x, y)
+    p.cell(w=TEXT_W, h=lh, text=_n(text), align=align)
+    return lh
+
+
+def _wrap_txt(p: FPDF, x: float, y: float, text: str,
+              size: int = 10, style: str = '',
+              color: tuple = (0, 0, 0),
+              max_w: float = TEXT_W, line_spacing: float = 1.55) -> float:
+    """Wrapped multi-line text; returns total height consumed."""
+    p.set_font('Helvetica', style=style, size=size)
+    p.set_text_color(*color)
+    lh = size * line_spacing / 72
+    p.set_xy(x, y)
+    p.multi_cell(w=max_w, h=lh, text=_n(text), align='L')
+    return p.get_y() - y
+
+
+def _place_img(p: FPDF, img_path: Path, top: float, max_h: float) -> None:
+    """Embed PNG directly, centred in TEXT_W x max_h box, aspect-ratio preserved."""
+    w_nat, h_nat = _img_dims(img_path)
+    aspect = w_nat / h_nat
+    if TEXT_W / max_h >= aspect:
+        dh, dw = max_h, max_h * aspect
     else:
-        draw_w = max_w_in
-        draw_h = draw_w / img_aspect
-
-    # Centre within the available box
-    left   = (left_in + (max_w_in - draw_w) / 2) / PAGE_W
-    bottom = (bottom_in + (max_h_in - draw_h) / 2) / PAGE_H
-    width  = draw_w / PAGE_W
-    height = draw_h / PAGE_H
-
-    ax = fig.add_axes([left, bottom, width, height])
-    ax.imshow(img)
-    ax.axis('off')
+        dw, dh = TEXT_W, TEXT_W / aspect
+    x = MARGIN + (TEXT_W - dw) / 2
+    y = top   + (max_h - dh)  / 2
+    p.image(str(img_path), x=x, y=y, w=dw, h=dh)
 
 
-def title_page(pdf, analysis_def, patient_ids, date_str):
-    fig = plt.figure(figsize=(PAGE_W, PAGE_H))
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.axis('off')
+# ── Page builders ──────────────────────────────────────────────────────────────
 
-    x = MARGIN / PAGE_W          # left edge in figure fraction
-    y = 0.95                      # start near top
-
-    ax.text(x, y, 'EEG Clinical Analysis Report',
-            transform=ax.transAxes, ha='left', va='top',
-            fontsize=18, fontweight='bold')
-    ax.text(x, y - 0.055, analysis_def['full_title'],
-            transform=ax.transAxes, ha='left', va='top', fontsize=13)
-    ax.text(x, y - 0.09, 'Harborview Medical Center  ·  University of Washington',
-            transform=ax.transAxes, ha='left', va='top', fontsize=10)
-    ax.text(x, y - 0.115, f'Generated: {date_str}',
-            transform=ax.transAxes, ha='left', va='top', fontsize=9, color='#555555')
-
-    ax.plot([x, 1 - x], [y - 0.135, y - 0.135],
-            color='black', linewidth=0.8, transform=ax.transAxes, clip_on=False)
-
-    ax.text(x, y - 0.165, 'Paradigm Overview',
-            transform=ax.transAxes, ha='left', va='top',
-            fontsize=11, fontweight='bold')
-
-    overview_top = y - 0.205
-    wrapped_overview = _wrap(analysis_def['overview'])
-    ax.text(x, overview_top, wrapped_overview,
-            transform=ax.transAxes, ha='left', va='top',
-            fontsize=10, linespacing=1.6)
-
-    pdf.savefig(fig, bbox_inches='tight')
-    plt.close(fig)
-
-    # Page 2 — patients and figures list
-    fig2 = plt.figure(figsize=(PAGE_W, PAGE_H))
-    ax2  = fig2.add_axes([0, 0, 1, 1])
-    ax2.axis('off')
-
-    y2 = 0.92
-    ax2.text(x, y2, f'Patients in this report ({len(patient_ids)})',
-             transform=ax2.transAxes, ha='left', va='top',
-             fontsize=11, fontweight='bold')
-    ax2.text(x, y2 - 0.04, '  '.join(patient_ids),
-             transform=ax2.transAxes, ha='left', va='top',
-             fontsize=10, family='monospace')
-
-    figures_y = y2 - 0.10
-    ax2.text(x, figures_y, 'Figures included per patient',
-             transform=ax2.transAxes, ha='left', va='top',
-             fontsize=11, fontweight='bold')
-    for i, fig_def in enumerate(analysis_def['figures']):
-        ax2.text(x + 0.02, figures_y - 0.045 - i * 0.042, f'- {fig_def["title"]}',
-                 transform=ax2.transAxes, ha='left', va='top', fontsize=10)
-
-    pdf.savefig(fig2, bbox_inches='tight')
-    plt.close(fig2)
-
-
-def patient_divider(pdf, patient_id, analysis_title, metadata=None):
-    fig = plt.figure(figsize=(PAGE_W, PAGE_H))
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.axis('off')
-
-    ax.text(0.5, 0.56, patient_id,
-            transform=ax.transAxes, ha='center', va='center',
-            fontsize=28, fontweight='bold')
-    ax.text(0.5, 0.50, analysis_title,
-            transform=ax.transAxes, ha='center', va='center', fontsize=14)
-    ax.plot([0.1, 0.9], [0.54, 0.54],
-            color='black', linewidth=0.8, transform=ax.transAxes, clip_on=False)
-
-    if metadata:
-        note = _build_metadata_note(metadata)
-        if note:
-            ax.text(0.5, 0.44, _wrap(note, width=80),
-                    transform=ax.transAxes, ha='center', va='top',
-                    fontsize=9, style='italic', color='black', linespacing=1.5)
-
-    pdf.savefig(fig, bbox_inches='tight')
-    plt.close(fig)
-
-
-
-
-def _build_metadata_note(metadata):
-    """Return a one-line analysis note from a metadata dict, or empty string."""
-    parts = []
-    n_rare_pre  = metadata.get('n_rare_pre_rejection')
-    n_rare_post = metadata.get('n_rare_post_rejection')
-    n_std_pre   = metadata.get('n_std_pre_rejection')
-    n_std_post  = metadata.get('n_std_post_rejection')
-    thresh      = metadata.get('rejection_threshold_uv')
-    ref         = metadata.get('reference', '')
-    hp          = metadata.get('highpass_hz')
-    lp          = metadata.get('lowpass_hz')
-
-    if n_rare_pre is not None and n_rare_post is not None:
-        n_rare_rej = n_rare_pre - n_rare_post
-        n_std_rej  = (n_std_pre or 0) - (n_std_post or 0)
-        thresh_str = f'>{thresh} µV' if thresh else 'threshold'
-        parts.append(
-            f'Tones: {n_rare_post} rare / {n_std_post} standard '
-            f'({n_rare_rej} rare and {n_std_rej} standard excluded, {thresh_str}).'
-        )
-    if ref:
-        parts.append(f'Reference: {ref}.')
-    if hp is not None and lp is not None:
-        parts.append(f'Filter: {hp}–{lp} Hz.')
-
-    fischer    = metadata.get('fischer_score')
-    n_comp     = metadata.get('n_components')
-    shao_mmn   = metadata.get('shao_mmn_positive')
-    shao_p3b   = metadata.get('shao_p3b_positive')
-    if fischer is not None and n_comp is not None:
-        parts.append(f'Fischer hierarchy: {fischer}/{n_comp} components significant.')
-    if shao_mmn is not None and shao_p3b is not None:
-        mmn_sym = '✓' if shao_mmn else '✗'
-        p3b_sym = '✓' if shao_p3b else '✗'
-        combined = '✓' if (shao_mmn and shao_p3b) else '✗'
-        parts.append(f'Shao 2025 thresholds: MMN {mmn_sym}  P3b {p3b_sym}  Combined {combined}.')
-
-    return '  '.join(parts)
-
-
-def figure_page(pdf, img_path, patient_id, fig_def, citation_nums=None):
-    # Layout (bottom → top):
-    #   BOTTOM_MARGIN | caption text | rule | IMG_PAD | image | IMG_PAD | header
-    # CAPTION_H is sized to the actual text so blank space ends up between the
-    # image and the caption rather than below the text.
-    HEADER_H     = 0.55   # inches — patient/title strip at top
-    IMG_PAD      = 0.20   # inches — vertical gap between image and caption rule
-    BOTTOM_MARGIN = 0.50  # inches — whitespace below description text
-
-    full_description = fig_def['description']
-    n_desc_lines = len(_wrap(full_description).split('\n'))
-    # fontsize 9, linespacing 1.55 → ~0.194 in per line; +0.55 for rule + bold title line
-    CAPTION_H = max(1.0, 0.55 + n_desc_lines * 9 * 1.55 / 72)
-
-    img_max_w   = PAGE_W - 2 * MARGIN
-    img_max_h   = PAGE_H - HEADER_H - CAPTION_H - 2 * IMG_PAD - BOTTOM_MARGIN
-    img_bottom_in = BOTTOM_MARGIN + CAPTION_H + IMG_PAD
-
-    fig = plt.figure(figsize=(PAGE_W, PAGE_H))
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.axis('off')
-
-    # ── header ──
-    header_top = (PAGE_H - MARGIN / 2) / PAGE_H
-    ax.text(MARGIN / PAGE_W, header_top,
-            f'Patient: {patient_id}',
-            transform=ax.transAxes, ha='left', va='top',
-            fontsize=10, fontweight='bold')
-    ax.text(1 - MARGIN / PAGE_W, header_top,
-            fig_def['title'],
-            transform=ax.transAxes, ha='right', va='top', fontsize=10)
-    rule_y = (PAGE_H - HEADER_H) / PAGE_H
-    ax.plot([MARGIN / PAGE_W, 1 - MARGIN / PAGE_W], [rule_y, rule_y],
-            color='black', linewidth=0.6, transform=ax.transAxes, clip_on=False)
-
-    # ── image (aspect-correct) ──
-    _place_image(fig, img_path,
-                 left_in=MARGIN, bottom_in=img_bottom_in,
-                 max_w_in=img_max_w, max_h_in=img_max_h)
-
-    # ── caption ──
-    cap_top = (BOTTOM_MARGIN + CAPTION_H - 0.15) / PAGE_H
-    ax.plot([MARGIN / PAGE_W, 1 - MARGIN / PAGE_W], [cap_top, cap_top],
-            color='black', linewidth=0.6, transform=ax.transAxes, clip_on=False)
-
-    cx = MARGIN / PAGE_W
-    title_text = fig_def['title']
-    if citation_nums:
-        title_text += '  ' + ','.join(f'[{n}]' for n in sorted(citation_nums))
-    ax.text(cx, cap_top - 0.005,
-            title_text,
-            transform=ax.transAxes, ha='left', va='top',
-            fontsize=10, fontweight='bold')
-    ax.text(cx, cap_top - 0.045,
-            _wrap(full_description),
-            transform=ax.transAxes, ha='left', va='top',
-            fontsize=9, linespacing=1.55)
-
-    pdf.savefig(fig, bbox_inches='tight')
-    plt.close(fig)
-
-
-def _fig_citations(fig_def):
-    """Return the list of citation strings for a figure, supporting both 'citations' (list) and legacy 'citation' (str)."""
+def _fig_citations(fig_def: dict) -> list:
     if 'citations' in fig_def:
         return [c.strip() for c in fig_def['citations'] if c.strip()]
     legacy = fig_def.get('citation', '').strip()
     return [legacy] if legacy else []
 
 
-def references_page(pdf, analysis_def):
-    """Render a single References page listing all unique citations from the figures."""
-    # Deduplicate while preserving order
-    seen = set()
-    unique_citations = []
-    for fig_def in analysis_def['figures']:
-        for c in _fig_citations(fig_def):
-            if c not in seen:
-                seen.add(c)
-                unique_citations.append(c)
+def _metadata_note(md: dict) -> str:
+    parts = []
+    n_rare_pre  = md.get('n_rare_pre_rejection')
+    n_rare_post = md.get('n_rare_post_rejection')
+    n_std_pre   = md.get('n_std_pre_rejection')
+    n_std_post  = md.get('n_std_post_rejection')
+    thresh      = md.get('rejection_threshold_uv')
+    ref         = md.get('reference', '')
+    hp          = md.get('highpass_hz')
+    lp          = md.get('lowpass_hz')
+    if n_rare_pre is not None and n_rare_post is not None:
+        rej_str = f'>{thresh} uV' if thresh else 'threshold'
+        n_rare_rej = n_rare_pre  - n_rare_post
+        n_std_rej  = (n_std_pre or 0) - (n_std_post or 0)
+        parts.append(f'Tones: {n_rare_post} rare / {n_std_post} standard '
+                     f'({n_rare_rej} rare and {n_std_rej} standard excluded, {rej_str}).')
+    if ref:
+        parts.append(f'Reference: {ref}.')
+    if hp is not None and lp is not None:
+        parts.append(f'Filter: {hp}-{lp} Hz.')
+    fischer = md.get('fischer_score')
+    n_comp  = md.get('n_components')
+    if fischer is not None and n_comp is not None:
+        parts.append(f'Fischer hierarchy: {fischer}/{n_comp} components significant.')
+    shao_mmn = md.get('shao_mmn_positive')
+    shao_p3b = md.get('shao_p3b_positive')
+    if shao_mmn is not None and shao_p3b is not None:
+        ms = 'Pass' if shao_mmn else 'Fail'
+        ps = 'Pass' if shao_p3b else 'Fail'
+        cs = 'Pass' if (shao_mmn and shao_p3b) else 'Fail'
+        parts.append(f'Shao 2025: MMN {ms}  P3b {ps}  Combined {cs}.')
+    return '  '.join(parts)
 
-    if not unique_citations:
+
+def title_page(p: FPDF, adef: dict, patient_ids: list, date_str: str) -> None:
+    # Page 1 — paradigm overview
+    p.add_page()
+    y = 0.55
+    y += _txt(p, MARGIN, y, 'EEG Clinical Analysis Report', size=18, style='B') + 0.12
+    y += _txt(p, MARGIN, y, adef['full_title'], size=13) + 0.08
+    y += _txt(p, MARGIN, y, 'Harborview Medical Center  \xb7  University of Washington', size=10) + 0.06
+    _txt(p, MARGIN, y, f'Generated: {date_str}', size=9, color=(100, 100, 100))
+    y += 0.25
+    _rule(p, y);  y += 0.18
+    y += _txt(p, MARGIN, y, 'Paradigm Overview', size=11, style='B') + 0.14
+    _wrap_txt(p, MARGIN, y, adef['overview'], size=10, line_spacing=1.6)
+
+    # Page 2 — patients + figures index
+    p.add_page()
+    y = 0.55
+    y += _txt(p, MARGIN, y, f'Patients in this report ({len(patient_ids)})',
+              size=11, style='B') + 0.10
+    y += _txt(p, MARGIN, y, '   '.join(patient_ids), size=10) + 0.22
+    y += _txt(p, MARGIN, y, 'Figures included per patient', size=11, style='B') + 0.12
+    for fd in adef['figures']:
+        y += _txt(p, MARGIN + 0.15, y, f'- {fd["title"]}', size=10) + 0.04
+
+
+def patient_divider(p: FPDF, patient_id: str, analysis_title: str,
+                    metadata: dict = None) -> None:
+    p.add_page()
+    mid = PAGE_H / 2
+    _rule(p, mid - 0.45)
+    _txt(p, MARGIN, mid - 0.38, patient_id, size=28, style='B', align='C')
+    _txt(p, MARGIN, mid + 0.08, analysis_title, size=14, align='C')
+    _rule(p, mid + 0.35)
+    if metadata:
+        note = _metadata_note(metadata)
+        if note:
+            _wrap_txt(p, MARGIN + 0.5, mid + 0.48, note,
+                      size=9, style='I', max_w=TEXT_W - 1.0)
+
+
+def figure_page(p: FPDF, img_path: Path, patient_id: str,
+                fig_def: dict, citation_nums: list = None) -> None:
+    HEADER_H      = 0.55
+    IMG_PAD       = 0.20
+    BOTTOM_MARGIN = 0.50
+
+    desc      = fig_def['description']
+    n_lines   = len(textwrap.fill(desc, width=90).split('\n'))
+    caption_h = max(1.0, 0.55 + n_lines * 9 * 1.55 / 72)
+
+    rule_y     = MARGIN / 2 + HEADER_H
+    img_top    = rule_y + IMG_PAD
+    img_max_h  = PAGE_H - rule_y - caption_h - 2 * IMG_PAD - BOTTOM_MARGIN
+    cap_rule_y = PAGE_H - BOTTOM_MARGIN - caption_h
+
+    p.add_page()
+
+    # Header: patient left, figure title right
+    lh_hdr = 10 * 1.4 / 72
+    _txt(p, MARGIN, MARGIN / 2, f'Patient: {patient_id}', size=10, style='B', align='L')
+    _txt(p, MARGIN, MARGIN / 2, fig_def['title'], size=10, align='R')
+    _rule(p, rule_y)
+
+    # Image — direct PNG embed
+    _place_img(p, img_path, top=img_top, max_h=img_max_h)
+
+    # Caption
+    _rule(p, cap_rule_y)
+    title_text = fig_def['title']
+    if citation_nums:
+        title_text += '  ' + ', '.join(f'[{n}]' for n in sorted(citation_nums))
+    y = cap_rule_y + 0.06
+    y += _txt(p, MARGIN, y, title_text, size=10, style='B') + 0.06
+    _wrap_txt(p, MARGIN, y, desc, size=9, line_spacing=1.55)
+
+
+def references_page(p: FPDF, adef: dict) -> None:
+    seen, unique = set(), []
+    for fd in adef['figures']:
+        for c in _fig_citations(fd):
+            if c and c not in seen:
+                seen.add(c); unique.append(c)
+    if not unique:
         return
-
-    fig = plt.figure(figsize=(PAGE_W, PAGE_H))
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.axis('off')
-
-    cx = MARGIN / PAGE_W
-    y = 0.93
-
-    ax.text(cx, y, 'References',
-            transform=ax.transAxes, ha='left', va='top',
-            fontsize=13, fontweight='bold')
-    ax.plot([cx, 1 - cx], [y - 0.03, y - 0.03],
-            color='black', linewidth=0.6, transform=ax.transAxes, clip_on=False)
-
-    y -= 0.06
-    text_w = PAGE_W - 2 * MARGIN        # inches
-    chars_per_line = int(text_w / (9 / 72) * 1.6)   # rough estimate at fontsize 9
-
-    for i, citation in enumerate(unique_citations, start=1):
-        wrapped = textwrap.fill(f'[{i}]  {citation}', width=chars_per_line,
+    p.add_page()
+    y = 0.55
+    y += _txt(p, MARGIN, y, 'References', size=13, style='B') + 0.08
+    _rule(p, y);  y += 0.14
+    for i, citation in enumerate(unique, 1):
+        wrapped = textwrap.fill(f'[{i}]  {citation}', width=88,
                                 subsequent_indent='     ')
-        n_lines = len(wrapped.split('\n'))
-        line_h = 1.55 * 9 / (72 * PAGE_H)
-        ax.text(cx, y, wrapped,
-                transform=ax.transAxes, ha='left', va='top',
-                fontsize=9, linespacing=1.55)
-        y -= n_lines * line_h + 0.018
-
-    pdf.savefig(fig, bbox_inches='tight')
-    plt.close(fig)
+        h = _wrap_txt(p, MARGIN, y, wrapped, size=9, line_spacing=1.55)
+        y += h + 0.08
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Report builder + main ──────────────────────────────────────────────────────
 
-def collect_patients(results_dir, analysis_key):
-    """Return sorted list of (patient_id, {suffix: Path}) for a given analysis subdir."""
+def _collect_patients(results_dir: Path, analysis_key: str) -> dict:
     patients = {}
-    for patient_dir in sorted(results_dir.iterdir()):
-        if not patient_dir.is_dir():
+    for pd in sorted(results_dir.iterdir()):
+        if not pd.is_dir():
             continue
-        patient_id = patient_dir.name
-        analysis_dir = patient_dir / analysis_key
-        if not analysis_dir.is_dir():
-            # voice files may be in the patient root for older sessions
-            analysis_dir = patient_dir
-        pngs = {p.name: p for p in analysis_dir.glob('*.png')}
+        ad = pd / analysis_key
+        if not ad.is_dir():
+            ad = pd   # voice files may live in patient root for older sessions
+        pngs = {f.name: f for f in ad.glob('*.png')}
         if pngs:
-            patients[patient_id] = pngs
+            patients[pd.name] = pngs
     return patients
 
 
-def build_report(analysis_key, analysis_def, results_dir, reports_dir, date_str):
-    pdf_path = reports_dir / analysis_def['pdf_name']
-    # Delete old report
+def build_report(analysis_key: str, adef: dict, date_str: str) -> None:
+    pdf_path = REPORTS_DIR / adef['pdf_name']
     if pdf_path.exists():
         pdf_path.unlink()
         print(f'  Deleted old report: {pdf_path.name}')
 
-    patients = collect_patients(results_dir, analysis_key)
+    patients = _collect_patients(RESULTS_DIR, analysis_key)
     if not patients:
         print(f'  No results found for "{analysis_key}" — skipping.')
         return
-
     print(f'  Found {len(patients)} patient(s): {", ".join(patients)}')
 
-    # Build citation number map (preserves insertion order, deduplicates)
-    citation_to_num = {}
-    for fig_def in analysis_def['figures']:
-        for c in _fig_citations(fig_def):
-            if c and c not in citation_to_num:
-                citation_to_num[c] = len(citation_to_num) + 1
+    cit_to_num: dict = {}
+    for fd in adef['figures']:
+        for c in _fig_citations(fd):
+            if c and c not in cit_to_num:
+                cit_to_num[c] = len(cit_to_num) + 1
 
-    with PdfPages(str(pdf_path)) as pdf:
-        # Cover page
-        title_page(pdf, analysis_def, list(patients.keys()), date_str)
+    p = _make_pdf()
+    title_page(p, adef, list(patients.keys()), date_str)
 
-        for patient_id, pngs in patients.items():
-            # Load per-patient metadata sidecar if present
-            meta_path = results_dir / patient_id / analysis_key / 'metadata.json'
-            patient_metadata = None
-            if meta_path.exists():
-                with open(meta_path) as f:
-                    patient_metadata = json.load(f)
+    for patient_id, pngs in patients.items():
+        meta_path = RESULTS_DIR / patient_id / analysis_key / 'metadata.json'
+        metadata  = json.loads(meta_path.read_text()) if meta_path.exists() else None
+        patient_divider(p, patient_id, adef['title'], metadata=metadata)
 
-            # Patient divider — includes metadata summary if available
-            patient_divider(pdf, patient_id, analysis_def['title'], metadata=patient_metadata)
+        included = 0
+        for fd in adef['figures']:
+            matches = [v for k, v in pngs.items() if k.endswith(fd['suffix'])]
+            if not matches:
+                continue
+            nums = [cit_to_num[c] for c in _fig_citations(fd) if c in cit_to_num]
+            figure_page(p, matches[0], patient_id, fd, citation_nums=nums)
+            included += 1
 
-            included = 0
-            for fig_def in analysis_def['figures']:
-                matches = [p for name, p in pngs.items() if name.endswith(fig_def['suffix'])]
-                if not matches:
-                    continue
-                citation_nums = [citation_to_num[c] for c in _fig_citations(fig_def)
-                                 if c in citation_to_num]
-                figure_page(pdf, matches[0], patient_id, fig_def,
-                            citation_nums=citation_nums)
-                included += 1
+        if included == 0:
+            p.add_page()
+            _txt(p, MARGIN, PAGE_H / 2, f'No figures found for {patient_id}.',
+                 size=14, color=(136, 136, 136), align='C')
 
-            if included == 0:
-                fig = plt.figure(figsize=(8.5, 11))
-                ax = fig.add_axes([0, 0, 1, 1])
-                ax.axis('off')
-                ax.text(0.5, 0.55, f'No figures found for {patient_id}',
-                        transform=ax.transAxes, ha='center', va='center',
-                        fontsize=14, color=GREY, style='italic')
-                ax.text(0.5, 0.48,
-                        f'Run notebooks/{analysis_def["title"].lower().replace(" ", "_")}.ipynb '
-                        f'to generate results.',
-                        transform=ax.transAxes, ha='center', va='center',
-                        fontsize=10, color=GREY, style='italic')
-                pdf.savefig(fig, bbox_inches='tight')
-                plt.close(fig)
-
-        # References page (all citations consolidated)
-        references_page(pdf, analysis_def)
-
-        # PDF metadata
-        d = pdf.infodict()
-        d['Title'] = analysis_def['full_title']
-        d['Author'] = 'Harborview Medical Center EEG Analysis'
-        d['Subject'] = 'Clinical EEG Report'
-        d['CreationDate'] = datetime.datetime.now()
-
+    references_page(p, adef)
+    p.output(str(pdf_path))
     print(f'  Saved: {pdf_path}')
 
 
-def main():
+def main() -> None:
     date_str = datetime.datetime.now().strftime('%B %d, %Y')
     print(f'Generating EEG analysis reports — {date_str}')
     print(f'Results directory: {RESULTS_DIR}')
     print(f'Reports directory: {REPORTS_DIR}\n')
-
-    for key, definition in ANALYSES.items():
-        print(f'[{key.upper()}] {definition["full_title"]}')
-        build_report(key, definition, RESULTS_DIR, REPORTS_DIR, date_str)
+    for key, adef in ANALYSES.items():
+        print(f'[{key.upper()}] {adef["full_title"]}')
+        build_report(key, adef, date_str)
         print()
-
     print('Done.')
 
 

@@ -95,13 +95,13 @@ def load_session(edf_path: Path, csv_path: Path):
 
 # ── Oddball P300 + Johnsen ─────────────────────────────────────────────────────
 
-def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.DataFrame,
-                plots_only: bool = False):
-    out_dir = RESULTS_DIR / subject_id / 'oddball'
-    out_dir.mkdir(parents=True, exist_ok=True)
+ODDBALL_REJECT_UV = 200
 
-    # 0.1 Hz highpass (not 1 Hz) — preserves slow ERP components like MMN (100-200 ms)
-    # Average reference — removes bias from the recording reference electrode
+
+def _build_oddball_evoked(raw, available_eeg, df, tag='oddball'):
+    """Filter, epoch, and average oddball EEG. Returns (epochs, evoked_rare, evoked_std,
+    diff_evoked, counts) where counts=(n_rare_pre, n_std_pre, n_rare_post, n_std_post).
+    Returns None on missing data."""
     raw_p300 = load_filtered_eeg(raw, available_eeg, l_freq=0.1, h_freq=30, verbose=False)
     raw_p300.set_eeg_reference('average', projection=False, verbose=False)
 
@@ -110,8 +110,7 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     std_df  = odd_df[odd_df['notes'] == 'standard_tone']
 
     if rare_df.empty:
-        print(f'  [oddball] No per-beep rows — skipping.')
-        return
+        return None
 
     n_rare_pre = len(rare_df)
     n_std_pre  = len(std_df)
@@ -129,12 +128,11 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     all_events = np.vstack([rare_events, std_events])
     all_events = all_events[all_events[:, 0].argsort()]
 
-    REJECT_THRESHOLD_UV = 200
     epochs = mne.Epochs(
         raw_p300, events=all_events,
         event_id={'standard': 1, 'rare': 2},
         tmin=-0.2, tmax=0.8, baseline=(-0.2, 0),
-        reject=dict(eeg=REJECT_THRESHOLD_UV * 1e-6),
+        reject=dict(eeg=ODDBALL_REJECT_UV * 1e-6),
         preload=True, verbose=False,
     )
 
@@ -142,12 +140,27 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     n_std_post  = len(epochs['standard'])
     n_rare_rej  = n_rare_pre - n_rare_post
     n_std_rej   = n_std_pre  - n_std_post
-    print(f'  [oddball] {len(epochs)} epochs ({n_rare_post} rare, {n_std_post} std)'
-          f'  —  rejected {n_rare_rej} rare, {n_std_rej} std (>{REJECT_THRESHOLD_UV} µV)')
+    print(f'  [{tag}] {len(epochs)} epochs ({n_rare_post} rare, {n_std_post} std)'
+          f'  --  rejected {n_rare_rej} rare, {n_std_rej} std (>{ODDBALL_REJECT_UV} uV)')
 
     evoked_rare = epochs['rare'].average()
     evoked_std  = epochs['standard'].average()
     diff_evoked = mne.combine_evoked([evoked_rare, evoked_std], weights=[1, -1])
+
+    counts = (n_rare_pre, n_std_pre, n_rare_post, n_std_post)
+    return epochs, evoked_rare, evoked_std, diff_evoked, counts
+
+
+def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.DataFrame,
+                plots_only: bool = False):
+    out_dir = RESULTS_DIR / subject_id / 'oddball'
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    result = _build_oddball_evoked(raw, available_eeg, df)
+    if result is None:
+        print(f'  [oddball] No per-beep rows -- skipping.')
+        return
+    epochs, evoked_rare, evoked_std, diff_evoked, (n_rare_pre, n_std_pre, n_rare_post, n_std_post) = result
 
     COMPONENTS = {
         # N1 uses source='standard': sign-flip test on standard-tone evoked amplitude.
@@ -477,9 +490,10 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
                 seen_region_labels.add(rlabel)
             ax_wave.plot(times_ms, y, color=color, lw=1.5, zorder=2, alpha=0.85, label=lbl)
 
-    # Component labels inside the plot: dotted vertical boundary lines + bold text at the top edge.
-    # All in axes/data coords — no extra top margin needed.
+    # Component labels: dotted vertical boundary lines + bold label at top edge.
+    # get_xaxis_transform() gives x in data coords (ms), y in axes fraction — correct for both.
     COMP_BRACKET_COLOR = {'N1': '#6A0DAD', 'MMN': '#1565C0', 'P3a': '#2E7D32', 'P3b': '#E65100'}
+    xform = ax_wave.get_xaxis_transform()
     for name, comp in COMPONENTS.items():
         lo_ms  = comp['win'][0] * 1000
         hi_ms  = comp['win'][1] * 1000
@@ -488,7 +502,7 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         ax_wave.axvline(lo_ms, color=color, lw=1.0, ls=':', alpha=0.55, zorder=1)
         ax_wave.axvline(hi_ms, color=color, lw=1.0, ls=':', alpha=0.55, zorder=1)
         ax_wave.text(mid_ms, 0.97, name, ha='center', va='top', fontsize=11,
-                     color=color, fontweight='bold', transform=ax_wave.transAxes)
+                     color=color, fontweight='bold', transform=xform)
 
     ax_wave.axvline(0, color='k', lw=0.8, ls=':')
     ax_wave.axhline(0, color='k', lw=0.5)
@@ -497,7 +511,7 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     ax_wave.legend(loc='lower right', fontsize=10, ncol=2)
     ax_wave.grid(True, alpha=0.3)
     plt.tight_layout()
-    fig.savefig(out_dir / f'{subject_id}_oddball_butterfly.png', dpi=150, bbox_inches='tight')
+    fig.savefig(out_dir / f'{subject_id}_oddball_butterfly.png', dpi=150)
     plt.close(fig)
 
     # Build plain-English topo summary strings (saved to metadata; used in report caption)
@@ -738,9 +752,9 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         'n_std_pre_rejection':   n_std_pre,
         'n_rare_post_rejection': n_rare_post,
         'n_std_post_rejection':  n_std_post,
-        'n_rare_rejected':       n_rare_rej,
-        'n_std_rejected':        n_std_rej,
-        'rejection_threshold_uv': REJECT_THRESHOLD_UV,
+        'n_rare_rejected':       n_rare_pre - n_rare_post,
+        'n_std_rejected':        n_std_pre  - n_std_post,
+        'rejection_threshold_uv': ODDBALL_REJECT_UV,
         'highpass_hz':           0.1,
         'lowpass_hz':            30,
         'reference':             'average',
@@ -769,6 +783,37 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
             json.dump(metadata, f, indent=2)
 
     print(f'  [oddball] Saved figures to {out_dir}')
+
+
+# ── Oddball video ───────────────────────────────────────────────────────────────
+
+def run_oddball_video(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.DataFrame):
+    out_dir = RESULTS_DIR / subject_id / 'oddball'
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    result = _build_oddball_evoked(raw, available_eeg, df, tag='oddball-video')
+    if result is None:
+        print(f'  [oddball-video] No per-beep rows -- skipping.')
+        return
+
+    _, _, _, diff_evoked, _ = result
+
+    montage = mne.channels.make_standard_montage('standard_1020')
+    diff_evoked.set_montage(montage, match_case=False, on_missing='warn')
+
+    video_path = out_dir / f'{subject_id}_oddball_topomap.mp4'
+    print(f'  [oddball-video] Generating topomap animation (20 fps) ...')
+    try:
+        fig, anim = diff_evoked.animate_topomap(
+            times=diff_evoked.times, ch_type='eeg', frame_rate=20,
+            time_unit='ms', show=False, blit=False,
+        )
+        anim.save(str(video_path), writer='ffmpeg', dpi=100)
+        plt.close(fig)
+        print(f'  [oddball-video] Saved: {video_path}')
+    except Exception as e:
+        print(f'  [oddball-video] Failed: {e}')
+        plt.close('all')
 
 
 # ── Language ITPC ──────────────────────────────────────────────────────────────
@@ -957,10 +1002,11 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
 
             t = run['edf_start'] + (PROMPT_DUR_EST if has_prompt[i] else 0)
             for cycle in range(TOTAL_CYCLES):
-                keep_ev_list.append([int(t * sfreq), 0, 1])
+                # Epoch onset is AFTER the command audio ends (paper: 10s window follows command)
+                keep_ev_list.append([int((t + keep_audio_est) * sfreq), 0, 1])
                 keep_meta.append({'side': side, 'cycle': cycle, 'run': i})
                 stop_t = t + keep_audio_est + KEEP_PAUSE_S
-                stop_ev_list.append([int(stop_t * sfreq), 0, 2])
+                stop_ev_list.append([int((stop_t + keep_audio_est) * sfreq), 0, 2])
                 stop_meta.append({'side': side, 'cycle': cycle, 'run': i})
                 t = stop_t + keep_audio_est + STOP_PAUSE_S
 
@@ -1134,22 +1180,28 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         freq_idx = np.where((psd_freqs_svm >= flo) & (psd_freqs_svm <= fhi))[0]
         X_svm[:, bi * n_ch_svm:(bi + 1) * n_ch_svm] = psds_sub[:, :, freq_idx].mean(axis=2)
 
-    logo      = LeaveOneGroupOut()
-    clf_svm   = make_pipeline(StandardScaler(), LinearSVC(max_iter=10000, dual=True))
-    auc_scores = cross_val_score(
-        clf_svm, X_svm, sub_labels,
-        scoring='roc_auc', cv=logo, groups=sub_groups,
-    )
-    mean_auc_svm = auc_scores.mean()
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import cross_val_predict
 
-    N_PERMS_SVM    = 200
+    logo    = LeaveOneGroupOut()
+    clf_svm = make_pipeline(StandardScaler(), LinearSVC(max_iter=10000, dual=True))
+
+    # LOO decision function values → AUC + per-epoch probabilities for time-course plot
+    decision_vals = cross_val_predict(
+        clf_svm, X_svm, sub_labels,
+        method='decision_function', cv=logo, groups=sub_groups,
+    )
+    mean_auc_svm = roc_auc_score(sub_labels, decision_vals)
+    # Sigmoid maps decision function to [0,1] for display
+    prob_keep = 1.0 / (1.0 + np.exp(-decision_vals))
+
+    N_PERMS_SVM     = 500
     perm_scores_svm = []
     rng_svm = np.random.default_rng(42)
     for _ in range(N_PERMS_SVM):
-        perm_auc = cross_val_score(
-            clf_svm, X_svm, rng_svm.permutation(sub_labels),
-            scoring='roc_auc', cv=logo, groups=sub_groups,
-        ).mean()
+        perm_auc = roc_auc_score(
+            rng_svm.permutation(sub_labels), decision_vals
+        )
         perm_scores_svm.append(perm_auc)
 
     perm_scores_svm = np.array(perm_scores_svm)
@@ -1168,6 +1220,28 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     fig.savefig(out_dir / f'{subject_id}_command_svm_null.png', dpi=150)
+    plt.close(fig)
+
+    # Decoding probability time-course (Claassen Fig. 3 equivalent)
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.plot(prob_keep, color='steelblue', lw=1.0)
+    ax.axhline(0.5, color='k', ls='--', lw=0.8, label='Chance (0.5)')
+    ax.set(ylim=(0, 1), xlabel='Sub-epoch number (2 s each)',
+           ylabel='P("keep moving")',
+           title=f'{subject_id}: SVM decoding probability  AUC={mean_auc_svm:.3f}  p={p_svm:.3f}')
+    for i in range(n_pairs):
+        keep_idx = np.where((sub_groups == i) & (sub_labels == 1))[0]
+        stop_idx  = np.where((sub_groups == i) & (sub_labels == 0))[0]
+        if len(keep_idx):
+            ax.axvline(keep_idx[0] - 0.5, color='green', lw=1.0, alpha=0.7,
+                       label='Keep onset' if i == 0 else None)
+        if len(stop_idx):
+            ax.axvline(stop_idx[0] - 0.5, color='red', lw=1.0, alpha=0.7,
+                       label='Stop onset' if i == 0 else None)
+    ax.legend(fontsize=8, loc='upper right')
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
+    fig.savefig(out_dir / f'{subject_id}_command_decoding.png', dpi=150)
     plt.close(fig)
 
     # SVM spatial patterns
@@ -1208,22 +1282,52 @@ def main():
     parser = argparse.ArgumentParser(description='Batch EEG analysis runner')
     parser.add_argument('--force', action='store_true', help='Re-run even if outputs exist')
     parser.add_argument('--plots-only', action='store_true',
-                        help='Regenerate figures only — skip permutations and SVM (oddball). '
+                        help='Regenerate figures only -- skip permutations and SVM (oddball). '
                              'Requires a previous full run to have cached null_arrays.npz.')
+    parser.add_argument('--video', action='store_true',
+                        help='Generate oddball topographic MP4 animation (20 fps, requires ffmpeg). '
+                             'Skips all other analyses.')
     parser.add_argument('--patients', nargs='+', metavar='ID', help='Limit to specific patient IDs')
     parser.add_argument('--analyses', nargs='+', choices=ALL_ANALYSES, metavar='NAME',
                         help='Limit to specific analyses')
     args = parser.parse_args()
 
-    target_analyses  = args.analyses or ALL_ANALYSES
-    sessions         = discover_sessions()
-
+    sessions = discover_sessions()
     if args.patients:
         sessions = [s for s in sessions if s['patient_id'] in args.patients]
-    # Exclude test sessions
     sessions = [s for s in sessions if not s['patient_id'].lower().startswith(('jo', 'test'))]
 
     print(f'Sessions to consider: {[s["patient_id"] for s in sessions]}')
+
+    if args.video:
+        for session in sessions:
+            pid  = session['patient_id']
+            date = session['date']
+            video_path = RESULTS_DIR / pid / 'oddball' / f'{pid}_oddball_topomap.mp4'
+            if not args.force and video_path.exists():
+                print(f'\n{pid}: video already exists -- skipping (use --force to regenerate).')
+                continue
+            print(f'\n{"="*60}')
+            print(f'{pid} ({date}): generating topomap video')
+            print(f'{"="*60}')
+            try:
+                raw, sfreq, available_eeg, df = load_session(session['edf'], session['csv'])
+            except Exception as e:
+                print(f'  ERROR loading session: {e}')
+                continue
+            if not has_paradigm(df, 'oddball'):
+                print(f'  [oddball-video] No oddball rows in CSV -- skipping.')
+                continue
+            try:
+                run_oddball_video(pid, raw, sfreq, available_eeg, df)
+            except Exception as e:
+                import traceback
+                print(f'  ERROR generating video: {e}')
+                traceback.print_exc()
+        print('\nDone.')
+        return
+
+    target_analyses = args.analyses or ALL_ANALYSES
 
     for session in sessions:
         pid  = session['patient_id']
@@ -1232,7 +1336,7 @@ def main():
         work = [a for a in target_analyses
                 if (args.force or not has_results(pid, a))]
         if not work:
-            print(f'\n{pid} ({date}): all analyses present — skipping.')
+            print(f'\n{pid} ({date}): all analyses present -- skipping.')
             continue
 
         print(f'\n{"="*60}')
@@ -1247,7 +1351,7 @@ def main():
 
         for analysis in work:
             if not has_paradigm(df, analysis):
-                print(f'  [{analysis}] Not in CSV — skipping.')
+                print(f'  [{analysis}] Not in CSV -- skipping.')
                 continue
             print(f'  Running {analysis}...')
             try:
