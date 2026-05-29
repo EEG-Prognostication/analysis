@@ -23,9 +23,20 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from scipy.fft import fft
-from sklearn.model_selection import LeaveOneOut
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import LeaveOneGroupOut, LeaveOneOut, cross_val_predict
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
+from mne.decoding import LinearModel, get_coef
+from mne.time_frequency import psd_array_multitaper
+
+try:
+    from pyriemann.classification import MDM
+    from pyriemann.estimation import Covariances
+    HAS_PYRIEMANN = True
+except ImportError:
+    HAS_PYRIEMANN = False
 
 ANALYSIS_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ANALYSIS_ROOT))
@@ -945,9 +956,109 @@ def run_language(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd
 
 # ── Command ERD + SVM ──────────────────────────────────────────────────────────
 
+def _screen_background_eeg(raw, sfreq: float, available_eeg: list) -> dict:
+    """Automated pathological background screen on the first 2 minutes of EEG.
+
+    Based on Claassen group medRxiv 2025: burst suppression, voltage suppression,
+    and large inter-hemispheric asymmetry predict zero CMD yield regardless of
+    how clean the active-task recording looks.
+
+    Returns a dict with scalar features and a 'flags' list (empty = pass).
+    """
+    screen_dur_s = min(120.0, raw.times[-1])
+    data = raw.copy().crop(tmax=screen_dur_s).get_data(picks=available_eeg)
+
+    win_n   = int(0.5 * sfreq)
+    n_wins  = data.shape[1] // win_n
+    win_rms = np.zeros(n_wins)
+    n_supp  = 0
+
+    for w in range(n_wins):
+        seg       = data[:, w * win_n:(w + 1) * win_n]
+        ch_rms    = np.sqrt((seg ** 2).mean(axis=1))
+        win_rms[w] = ch_rms.mean()
+        if ch_rms.max() < 5e-6:  # all channels below 5 µV
+            n_supp += 1
+
+    suppression_frac = n_supp / max(n_wins, 1)
+    bs_score         = win_rms.std() / (win_rms.mean() + 1e-30)  # CV — high when bimodal
+
+    left_chs  = [ch for ch in ['F3', 'C3', 'T3', 'P3'] if ch in available_eeg]
+    right_chs = [ch for ch in ['F4', 'C4', 'T4', 'P4'] if ch in available_eeg]
+    asym = float('nan')
+    if left_chs and right_chs:
+        li = [available_eeg.index(c) for c in left_chs]
+        ri = [available_eeg.index(c) for c in right_chs]
+        rms_l = np.sqrt((data[li] ** 2).mean())
+        rms_r = np.sqrt((data[ri] ** 2).mean())
+        asym  = abs(rms_l - rms_r) / (rms_l + rms_r + 1e-30)
+
+    flags = []
+    if suppression_frac > 0.30:
+        flags.append(f'voltage suppression ({100 * suppression_frac:.0f}% of windows <5uV)')
+    if bs_score > 1.5:
+        flags.append(f'possible burst-suppression (window-RMS CV={bs_score:.2f})')
+    if not np.isnan(asym) and asym > 0.40:
+        flags.append(f'inter-hemispheric asymmetry ({100 * asym:.0f}%)')
+
+    return {
+        'suppression_frac': suppression_frac,
+        'bs_score':         bs_score,
+        'asymmetry':        asym,
+        'flags':            flags,
+        'pass':             len(flags) == 0,
+    }
+
+
+_CMD_AUDIO_FALLBACK = {
+    'right_keep': 2.712, 'right_stop': 2.904,
+    'left_keep':  2.760, 'left_stop':  2.928,
+    'prompt':     3.809,
+}
+
+def _measure_command_audio_durations() -> dict:
+    """Return command audio file durations in seconds via ffprobe.
+    Falls back to pre-measured defaults if files are missing or ffprobe fails."""
+    import subprocess
+    audio_root = REPO_ROOT / 'stimulus_software' / 'audio_data'
+    file_map = {
+        'right_keep': audio_root / 'static'  / 'right_keep.mp3',
+        'right_stop': audio_root / 'static'  / 'right_stop.mp3',
+        'left_keep':  audio_root / 'static'  / 'left_keep.mp3',
+        'left_stop':  audio_root / 'static'  / 'left_stop.mp3',
+        'prompt':     audio_root / 'prompts' / 'motorcommandprompt.wav',
+    }
+    durations = {}
+    for name, path in file_map.items():
+        try:
+            result = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                 '-of', 'csv=p=0', str(path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            durations[name] = float(result.stdout.strip())
+        except Exception:
+            durations[name] = _CMD_AUDIO_FALLBACK[name]
+            if not path.exists():
+                print(f'  [command] WARNING: audio file not found: {path.name}, using fallback {_CMD_AUDIO_FALLBACK[name]:.3f}s')
+    return durations
+
+
 def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.DataFrame):
     out_dir = RESULTS_DIR / subject_id / 'command'
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    bg = _screen_background_eeg(raw, sfreq, available_eeg)
+    if bg['flags']:
+        for flag in bg['flags']:
+            print(f'  [command] BACKGROUND WARNING: {flag}')
+        print(f'  [command] Pathological background predicts zero CMD yield '
+              f'(Claassen 2025 medRxiv) — proceeding but interpret with caution')
+    else:
+        asym_str = f'{100 * bg["asymmetry"]:.0f}%' if not np.isnan(bg['asymmetry']) else 'n/a'
+        print(f'  [command] Background screen: pass  '
+              f'(suppression={100 * bg["suppression_frac"]:.0f}%  '
+              f'BS-CV={bg["bs_score"]:.2f}  asym={asym_str})')
 
     raw_erd = load_filtered_eeg(raw, available_eeg, l_freq=1, h_freq=40, verbose=False)
 
@@ -959,19 +1070,34 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         return
     print(f'  [command] Schema: {SCHEMA}')
 
+    # Audio durations needed by both schemas: pairs to offset audio onset → imagery onset,
+    # runs to reconstruct individual cycle onsets from the single run-level timestamp.
+    audio_dur = _measure_command_audio_durations()
+
     if SCHEMA == 'pairs':
         keep_df = df[df['stim_type'].str.match(r'(right|left)_keep', na=False)].copy()
         stop_df = df[df['stim_type'].str.match(r'(right|left)_stop', na=False)].copy()
         keep_df['side'] = keep_df['stim_type'].str.extract(r'(right|left)')
         stop_df['side'] = stop_df['stim_type'].str.extract(r'(right|left)')
 
+        # start_sample is the audio onset; imagery window begins after the audio ends.
+        keep_audio_offset = np.where(
+            keep_df['side'].values == 'right',
+            int(audio_dur['right_keep'] * sfreq),
+            int(audio_dur['left_keep']  * sfreq),
+        )
+        stop_audio_offset = np.where(
+            stop_df['side'].values == 'right',
+            int(audio_dur['right_stop'] * sfreq),
+            int(audio_dur['left_stop']  * sfreq),
+        )
         keep_events = np.column_stack([
-            keep_df['start_sample'].values,
+            keep_df['start_sample'].values + keep_audio_offset,
             np.zeros(len(keep_df), dtype=int),
             np.ones(len(keep_df), dtype=int),
         ])
         stop_events = np.column_stack([
-            stop_df['start_sample'].values,
+            stop_df['start_sample'].values + stop_audio_offset,
             np.zeros(len(stop_df), dtype=int),
             np.full(len(stop_df), 2, dtype=int),
         ])
@@ -986,34 +1112,49 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         KEEP_PAUSE_S   = 10.0
         STOP_PAUSE_S   = 10.0
         TOTAL_CYCLES   = 8
-        PROMPT_DUR_EST = 4.0
+        PROMPT_DELAY_S = 2.0  # CommandStimParams.PROMPT_DELAY_MS / 1000
 
-        run_durs   = (cmd_df['edf_end'] - cmd_df['edf_start']).values
-        has_prompt = cmd_df['has_prompt'].values
+        prompt_total_s = audio_dur['prompt'] + PROMPT_DELAY_S
+        has_prompt     = cmd_df['has_prompt'].values
 
         keep_ev_list, stop_ev_list = [], []
         keep_meta, stop_meta = [], []
 
         for i, (_, run) in enumerate(cmd_df.iterrows()):
-            effective_dur   = run_durs[i] - (PROMPT_DUR_EST if has_prompt[i] else 0)
-            audio_per_cycle = max((effective_dur / TOTAL_CYCLES) - KEEP_PAUSE_S - STOP_PAUSE_S, 1.5)
-            keep_audio_est  = audio_per_cycle / 2
-            side            = run['side']
+            side     = run['side']
+            keep_dur = audio_dur[f'{side}_keep']
+            stop_dur = audio_dur[f'{side}_stop']
 
-            t = run['edf_start'] + (PROMPT_DUR_EST if has_prompt[i] else 0)
+            t = run['edf_start'] + (prompt_total_s if has_prompt[i] else 0)
             for cycle in range(TOTAL_CYCLES):
                 # Epoch onset is AFTER the command audio ends (paper: 10s window follows command)
-                keep_ev_list.append([int((t + keep_audio_est) * sfreq), 0, 1])
+                keep_ev_list.append([int((t + keep_dur) * sfreq), 0, 1])
                 keep_meta.append({'side': side, 'cycle': cycle, 'run': i})
-                stop_t = t + keep_audio_est + KEEP_PAUSE_S
-                stop_ev_list.append([int((stop_t + keep_audio_est) * sfreq), 0, 2])
+                stop_t = t + keep_dur + KEEP_PAUSE_S
+                stop_ev_list.append([int((stop_t + stop_dur) * sfreq), 0, 2])
                 stop_meta.append({'side': side, 'cycle': cycle, 'run': i})
-                t = stop_t + keep_audio_est + STOP_PAUSE_S
+                t = stop_t + stop_dur + STOP_PAUSE_S
 
         keep_events  = np.array(keep_ev_list, dtype=int)
         stop_events  = np.array(stop_ev_list, dtype=int)
         keep_meta_df = pd.DataFrame(keep_meta)
         stop_meta_df = pd.DataFrame(stop_meta)
+
+        # Warn if any stimulus_paused row falls inside a command run window.
+        # Pauses shift the real cycle onsets but the reconstruction above ignores them.
+        pause_df = df[df['stim_type'] == 'stimulus_paused']
+        if not pause_df.empty:
+            run_dur_est = TOTAL_CYCLES * (KEEP_PAUSE_S + STOP_PAUSE_S) + 30
+            for _, run_row in cmd_df.iterrows():
+                run_start = run_row['edf_start']
+                hits = pause_df[
+                    (pause_df['edf_start'] >= run_start) &
+                    (pause_df['edf_start'] <= run_start + run_dur_est)
+                ]
+                if not hits.empty:
+                    print(f'  [command] WARNING: {len(hits)} pause(s) detected '
+                          f'during {run_row["stim_type"]} run at t={run_start:.1f}s — '
+                          f'reconstructed cycle onsets after the pause may be invalid')
 
     print(f'  [command] keep events: {len(keep_events)}  stop events: {len(stop_events)}')
 
@@ -1030,116 +1171,194 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     )
     print(f'  [command] cmd epochs: {len(epochs_cmd)} ({len(epochs_cmd["keep"])} keep, {len(epochs_cmd["stop"])} stop)')
 
-    # ERD PSD
+    # ERD PSD — overview averaged across all sides and motor channels (summary visualization)
     keep_ep = epochs_cmd['keep'].copy().pick(MOTOR_CHANNELS)
     stop_ep = epochs_cmd['stop'].copy().pick(MOTOR_CHANNELS)
     psd_k   = keep_ep.compute_psd(method='welch', fmin=1, fmax=40, verbose=False)
     psd_s   = stop_ep.compute_psd(method='welch', fmin=1, fmax=40, verbose=False)
     data_k, freqs_psd = psd_k.get_data(return_freqs=True)
-    data_s, _          = psd_s.get_data(return_freqs=True)
+    data_s, _         = psd_s.get_data(return_freqs=True)
 
     keep_avg = data_k.mean(axis=(0, 1))
     stop_avg = data_s.mean(axis=(0, 1))
     erd_db   = 10 * np.log10(keep_avg / (stop_avg + 1e-30))
 
-    MU_BAND   = (8,  12)
-    BETA_BAND = (14, 30)
+    MU_BAND       = (8,  12)
+    BETA_BAND     = (14, 30)
+    CONTRALATERAL = {'right': 'C3', 'left': 'C4'}
 
-    def band_power(data, freqs, fmin, fmax):
+    def band_power_per_ch(data, freqs, fmin, fmax):
+        """Band power per epoch per channel. Returns shape (n_epochs, n_ch)."""
         mask = (freqs >= fmin) & (freqs <= fmax)
-        return data[:, :, mask].mean(axis=(1, 2))
-
-    mu_k   = band_power(data_k, freqs_psd, *MU_BAND)
-    mu_s   = band_power(data_s, freqs_psd, *MU_BAND)
-    beta_k = band_power(data_k, freqs_psd, *BETA_BAND)
-    beta_s = band_power(data_s, freqs_psd, *BETA_BAND)
-
-    t_mu,   p_mu_two   = stats.ttest_rel(mu_k,   mu_s)
-    t_beta, p_beta_two = stats.ttest_rel(beta_k, beta_s)
-    p_mu   = p_mu_two   / 2 if t_mu   < 0 else 1 - p_mu_two   / 2
-    p_beta = p_beta_two / 2 if t_beta < 0 else 1 - p_beta_two / 2
+        return data[:, :, mask].mean(axis=2)
 
     def cohens_d_paired(a, b):
         diff = a - b
         return diff.mean() / (diff.std() + 1e-30)
 
-    d_mu   = cohens_d_paired(mu_k, mu_s)
-    d_beta = cohens_d_paired(beta_k, beta_s)
-    print(f'  [command] Mu p={p_mu:.4f} d={d_mu:.3f}  Beta p={p_beta:.4f} d={d_beta:.3f}')
+    # Per-side, per-channel ERD statistics — correct lateralization test.
+    # Right commands -> expected ERD (power decrease) at C3 (contralateral). Left -> C4.
+    erd_stats     = {}
+    sides_present = [s for s in ['right', 'left']
+                     if (keep_meta_df['side'] == s).any() and (stop_meta_df['side'] == s).any()]
 
-    # ERD spectrum + difference plot
+    for side in sides_present:
+        contra_ch = CONTRALATERAL.get(side)
+        ipsi_ch   = 'C4' if side == 'right' else 'C3'
+        k_mask    = keep_meta_df['side'].values == side
+        s_mask    = stop_meta_df['side'].values == side
+
+        ep_k_s = mne.Epochs(raw_erd, keep_events[k_mask], event_id={'keep': 1},
+                              tmin=0, tmax=9.9, baseline=None, preload=True, verbose=False)
+        ep_s_s = mne.Epochs(raw_erd, stop_events[s_mask], event_id={'stop': 2},
+                              tmin=0, tmax=9.9, baseline=None, preload=True, verbose=False)
+        ep_k_s.pick(MOTOR_CHANNELS)
+        ep_s_s.pick(MOTOR_CHANNELS)
+
+        dk_s, fk = ep_k_s.compute_psd(method='welch', fmin=1, fmax=40,
+                                        verbose=False).get_data(return_freqs=True)
+        ds_s, _  = ep_s_s.compute_psd(method='welch', fmin=1, fmax=40,
+                                        verbose=False).get_data(return_freqs=True)
+
+        mu_k_ch   = band_power_per_ch(dk_s, fk, *MU_BAND)    # (n_epochs, n_ch)
+        mu_s_ch   = band_power_per_ch(ds_s, fk, *MU_BAND)
+        beta_k_ch = band_power_per_ch(dk_s, fk, *BETA_BAND)
+        beta_s_ch = band_power_per_ch(ds_s, fk, *BETA_BAND)
+
+        erd_stats[side] = {}
+        for ci, ch in enumerate(ep_k_s.ch_names):
+            t_mu,   p2_mu   = stats.ttest_rel(mu_k_ch[:, ci],   mu_s_ch[:, ci])
+            t_beta, p2_beta = stats.ttest_rel(beta_k_ch[:, ci], beta_s_ch[:, ci])
+            p_mu   = p2_mu   / 2 if t_mu   < 0 else 1 - p2_mu   / 2
+            p_beta = p2_beta / 2 if t_beta < 0 else 1 - p2_beta / 2
+            erd_stats[side][ch] = dict(
+                mu_p=p_mu,   mu_d=cohens_d_paired(mu_k_ch[:, ci],   mu_s_ch[:, ci]),
+                beta_p=p_beta, beta_d=cohens_d_paired(beta_k_ch[:, ci], beta_s_ch[:, ci]),
+            )
+            tag = ' <- contra' if ch == contra_ch else ''
+            st  = erd_stats[side][ch]
+            print(f'  [command] {side} {ch}{tag}: '
+                  f'Mu p={st["mu_p"]:.4f} d={st["mu_d"]:.3f}  '
+                  f'Beta p={st["beta_p"]:.4f} d={st["beta_d"]:.3f}')
+
+        # Lateralization Index: (contra - ipsi) / (|contra| + |ipsi|)
+        # +1 = all suppression at contralateral channel (expected for true motor imagery)
+        # -1 = all suppression at ipsilateral channel (unexpected / artifact)
+        li_mu = li_beta = float('nan')
+        if contra_ch in ep_k_s.ch_names and ipsi_ch in ep_k_s.ch_names:
+            ci_c = ep_k_s.ch_names.index(contra_ch)
+            ci_i = ep_k_s.ch_names.index(ipsi_ch)
+            # ERD defined as stop - keep (positive when keep < stop = power suppressed)
+            erd_c_mu   = (mu_s_ch[:, ci_c]   - mu_k_ch[:, ci_c]).mean()
+            erd_i_mu   = (mu_s_ch[:, ci_i]   - mu_k_ch[:, ci_i]).mean()
+            erd_c_beta = (beta_s_ch[:, ci_c] - beta_k_ch[:, ci_c]).mean()
+            erd_i_beta = (beta_s_ch[:, ci_i] - beta_k_ch[:, ci_i]).mean()
+            li_mu   = (erd_c_mu   - erd_i_mu)   / (abs(erd_c_mu)   + abs(erd_i_mu)   + 1e-30)
+            li_beta = (erd_c_beta - erd_i_beta) / (abs(erd_c_beta) + abs(erd_i_beta) + 1e-30)
+            erd_stats[side]['LI_mu']   = li_mu
+            erd_stats[side]['LI_beta'] = li_beta
+            print(f'  [command] {side} LI: Mu={li_mu:+.3f}  Beta={li_beta:+.3f}  '
+                  f'({contra_ch} vs {ipsi_ch}; +1=contra dominant)')
+
+        # Lateralization plot: per-channel ERD curves with p-value annotations.
+        # Reuses the PSD data already computed above — no redundant epoch creation.
+        fig, axes_lat = plt.subplots(1, len(MOTOR_CHANNELS), figsize=(4 * len(MOTOR_CHANNELS), 4))
+        if len(MOTOR_CHANNELS) == 1:
+            axes_lat = [axes_lat]
+        for ax, ch in zip(axes_lat, MOTOR_CHANNELS):
+            ci_lat   = ep_k_s.ch_names.index(ch)
+            avg_k_ch = dk_s[:, ci_lat, :].mean(axis=0)
+            avg_s_ch = ds_s[:, ci_lat, :].mean(axis=0)
+            erd_ch   = 10 * np.log10(avg_k_ch / (avg_s_ch + 1e-30))
+            ax.plot(fk, erd_ch, color='purple', lw=1.5)
+            ax.axhline(0, color='k', lw=0.8, ls='--')
+            for f0, f1, c in [(8, 12, 'gold'), (14, 30, 'lightgreen')]:
+                ax.axvspan(f0, f1, color=c, alpha=0.2)
+            st     = erd_stats[side].get(ch, {})
+            ch_tag = ' (contra)' if ch == contra_ch else (' (ipsi)' if ch == ipsi_ch else '')
+            ax.set(title=(f'{ch}{ch_tag}\n'
+                          f'Mu p={st.get("mu_p", float("nan")):.3f}  '
+                          f'Beta p={st.get("beta_p", float("nan")):.3f}'),
+                   xlabel='Hz', ylabel='Keep−Stop (dB)')
+            ax.grid(True, alpha=0.3)
+        li_str = (f'  |  LI Mu={li_mu:+.2f}  Beta={li_beta:+.2f}'
+                  if not np.isnan(li_mu) else '')
+        fig.suptitle(f'{subject_id}: {side.capitalize()} command ERD by channel{li_str}', fontsize=11)
+        plt.tight_layout()
+        fig.savefig(out_dir / f'{subject_id}_command_{side}_lateralization.png', dpi=150)
+        plt.close(fig)
+
+        # Time-frequency ERD — reveals WHEN and at WHAT frequency suppression emerges.
+        # Uses Morlet wavelets on the same side-specific epochs already computed.
+        freqs_tfr = np.arange(4, 35, 1).astype(float)
+        n_cyc_tfr = np.maximum(freqs_tfr / 2.0, 3.0)
+        tfr_k = mne.time_frequency.tfr_morlet(
+            ep_k_s, freqs=freqs_tfr, n_cycles=n_cyc_tfr,
+            return_itc=False, average=True, verbose=False,
+        )
+        tfr_s = mne.time_frequency.tfr_morlet(
+            ep_s_s, freqs=freqs_tfr, n_cycles=n_cyc_tfr,
+            return_itc=False, average=True, verbose=False,
+        )
+        with np.errstate(divide='ignore', invalid='ignore'):
+            erd_tfr = 10 * np.log10(tfr_k.data / (tfr_s.data + 1e-30))  # (n_ch, n_freq, n_t)
+
+        fig_tfr, axes_tfr = plt.subplots(
+            1, len(MOTOR_CHANNELS), figsize=(5 * len(MOTOR_CHANNELS), 4),
+        )
+        if len(MOTOR_CHANNELS) == 1:
+            axes_tfr = [axes_tfr]
+        for ax_t, ch in zip(axes_tfr, tfr_k.ch_names):
+            ci_t = tfr_k.ch_names.index(ch)
+            img  = ax_t.imshow(
+                erd_tfr[ci_t], aspect='auto', origin='lower',
+                extent=[tfr_k.times[0], tfr_k.times[-1], freqs_tfr[0], freqs_tfr[-1]],
+                cmap='RdBu_r', vmin=-3, vmax=3,
+            )
+            for fline, col in [(8, 'gold'), (12, 'gold'), (14, 'lightgreen'), (30, 'lightgreen')]:
+                ax_t.axhline(fline, color=col, lw=0.8, ls='--', alpha=0.7)
+            ch_tag = ' (contra)' if ch == contra_ch else (' (ipsi)' if ch == ipsi_ch else '')
+            ax_t.set(xlabel='Time (s)', ylabel='Frequency (Hz)', title=f'{ch}{ch_tag}')
+            plt.colorbar(img, ax=ax_t, label='ERD (dB)')
+        fig_tfr.suptitle(
+            f'{subject_id}: {side.capitalize()} command Time-Frequency ERD  '
+            f'(blue=suppression, red=enhancement)',
+            fontsize=10,
+        )
+        plt.tight_layout()
+        fig_tfr.savefig(out_dir / f'{subject_id}_command_{side}_tfr.png', dpi=150)
+        plt.close(fig_tfr)
+
+    # ERD overview spectrum (all sides and channels averaged — see lateralization plots for stats)
     fig, axes = plt.subplots(2, 1, figsize=(10, 7))
     axes[0].semilogy(freqs_psd, keep_avg * 1e12, color='steelblue', lw=1.5, label='Keep (motor imagery)')
     axes[0].semilogy(freqs_psd, stop_avg * 1e12, color='firebrick',  lw=1.5, label='Stop (rest)')
     for f0, f1, c, lbl in [(8, 12, 'gold', 'Mu'), (14, 30, 'lightgreen', 'Beta')]:
         axes[0].axvspan(f0, f1, color=c, alpha=0.2, label=lbl)
     axes[0].set(xlabel='Hz', ylabel='PSD (pV²/Hz)',
-                title=f'{subject_id}: Motor channels ({MOTOR_CHANNELS}), Keep vs Stop PSD')
+                title=f'{subject_id}: Motor channels ({MOTOR_CHANNELS}), Keep vs Stop PSD (all sides averaged)')
     axes[0].legend(fontsize=8)
     axes[0].grid(True, alpha=0.3)
     axes[1].plot(freqs_psd, erd_db, color='purple', lw=1.5)
     axes[1].axhline(0, color='k', lw=0.8, ls='--')
-    for f0, f1, c, lbl in [
-        (8,  12, 'gold',       f'Mu  p={p_mu:.3f}{"✓" if p_mu < 0.05 else ""}'),
-        (14, 30, 'lightgreen', f'Beta  p={p_beta:.3f}{"✓" if p_beta < 0.05 else ""}'),
-    ]:
+    for f0, f1, c, lbl in [(8, 12, 'gold', 'Mu'), (14, 30, 'lightgreen', 'Beta')]:
         axes[1].axvspan(f0, f1, color=c, alpha=0.2, label=lbl)
     axes[1].set(xlabel='Hz', ylabel='Keep − Stop (dB)',
-                title='ERD: negative = power decrease during Keep (expected for motor imagery)')
+                title='ERD overview — see lateralization plots for per-channel stats')
     axes[1].legend(fontsize=8)
     axes[1].grid(True, alpha=0.3)
     plt.tight_layout()
     fig.savefig(out_dir / f'{subject_id}_command_erd.png', dpi=150)
     plt.close(fig)
 
-    # Lateralization plots
-    if 'C3' in available_eeg and 'C4' in available_eeg:
-        for side in ['right', 'left']:
-            side_keep = keep_meta_df['side'] == side
-            side_stop = stop_meta_df['side'] == side
-            if side_keep.sum() == 0:
-                continue
-            ep_k = mne.Epochs(raw_erd, keep_events[side_keep.values], event_id={'keep': 1},
-                               tmin=0, tmax=9.9, baseline=None, preload=True, verbose=False)
-            ep_s = mne.Epochs(raw_erd, stop_events[side_stop.values], event_id={'stop': 2},
-                               tmin=0, tmax=9.9, baseline=None, preload=True, verbose=False)
-            contra = 'C3' if side == 'right' else 'C4'
-            ipsi   = 'C4' if side == 'right' else 'C3'
-            fig, axes = plt.subplots(1, len(MOTOR_CHANNELS), figsize=(4 * len(MOTOR_CHANNELS), 4))
-            if len(MOTOR_CHANNELS) == 1:
-                axes = [axes]
-            for ax, ch in zip(axes, MOTOR_CHANNELS):
-                pk   = ep_k.copy().pick([ch]).compute_psd(method='welch', fmin=1, fmax=40, verbose=False)
-                ps   = ep_s.copy().pick([ch]).compute_psd(method='welch', fmin=1, fmax=40, verbose=False)
-                dk, f = pk.get_data(return_freqs=True)
-                ds, _ = ps.get_data(return_freqs=True)
-                erd_ch = 10 * np.log10(dk.mean(axis=(0, 1)) / (ds.mean(axis=(0, 1)) + 1e-30))
-                ax.plot(f, erd_ch, color='purple', lw=1.5)
-                ax.axhline(0, color='k', lw=0.8, ls='--')
-                for f0, f1, c in [(8, 12, 'gold'), (14, 30, 'lightgreen')]:
-                    ax.axvspan(f0, f1, color=c, alpha=0.2)
-                label = ch
-                if ch == contra: label += ' (contra ← expected ERD)'
-                elif ch == ipsi: label += ' (ipsi)'
-                ax.set(title=label, xlabel='Hz', ylabel='Keep−Stop (dB)')
-                ax.grid(True, alpha=0.3)
-            fig.suptitle(f'{subject_id}: {side.capitalize()} hand command ERD', fontsize=11)
-            plt.tight_layout()
-            fig.savefig(out_dir / f'{subject_id}_command_{side}_lateralization.png', dpi=150)
-            plt.close(fig)
-
     # Claassen SVM
-    from sklearn.pipeline import make_pipeline
-    from sklearn.svm import LinearSVC
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.model_selection import cross_val_score, LeaveOneGroupOut
-    from mne.time_frequency import psd_array_multitaper
-    from mne.decoding import LinearModel, get_coef
-
     SUB_EPOCH_DUR  = 2.0
     N_SUB          = 5
     sub_events_list, sub_labels, sub_groups = [], [], []
     n_pairs = min(len(keep_events), len(stop_events))
+    if len(keep_events) != len(stop_events):
+        print(f'  [command] WARNING: keep/stop count mismatch '
+              f'({len(keep_events)} keep vs {len(stop_events)} stop) — using {n_pairs} pairs')
 
     for pair_idx in range(n_pairs):
         k_sample = keep_events[pair_idx, 0]
@@ -1164,27 +1383,29 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         baseline=None, preload=True, verbose=False,
     ).pick(available_eeg)
 
+    if len(sub_epochs) != len(sub_events_arr):
+        n_oob = len(sub_events_arr) - len(sub_epochs)
+        print(f'  [command] WARNING: {n_oob} sub-epochs out of bounds — '
+              f'realigning sub_labels/sub_groups to selection')
+        sub_labels = sub_labels[sub_epochs.selection]
+        sub_groups = sub_groups[sub_epochs.selection]
+
     SVM_BANDS       = [(1, 3), (4, 7), (8, 13), (14, 30)]
     SVM_BAND_LABELS = ['delta', 'theta', 'alpha', 'beta']
 
     data_sub        = sub_epochs.get_data()
     n_sub_ep, n_ch_svm, _ = data_sub.shape
-    psds_list = []
-    for ep_data in data_sub:
-        psds, psd_freqs_svm = psd_array_multitaper(ep_data, sfreq=sfreq, fmin=1, fmax=30, verbose=False)
-        psds_list.append(psds)
-    psds_sub = np.array(psds_list)
+    psds_sub, psd_freqs_svm = psd_array_multitaper(
+        data_sub, sfreq=sfreq, fmin=1, fmax=30, verbose=False
+    )
 
     X_svm = np.zeros((n_sub_ep, n_ch_svm * len(SVM_BANDS)))
     for bi, (flo, fhi) in enumerate(SVM_BANDS):
         freq_idx = np.where((psd_freqs_svm >= flo) & (psd_freqs_svm <= fhi))[0]
         X_svm[:, bi * n_ch_svm:(bi + 1) * n_ch_svm] = psds_sub[:, :, freq_idx].mean(axis=2)
 
-    from sklearn.metrics import roc_auc_score
-    from sklearn.model_selection import cross_val_predict
-
     logo    = LeaveOneGroupOut()
-    clf_svm = make_pipeline(StandardScaler(), LinearSVC(max_iter=10000, dual=True))
+    clf_svm = make_pipeline(StandardScaler(), LinearSVC(max_iter=10000, dual='auto'))
 
     # LOO decision function values → AUC + per-epoch probabilities for time-course plot
     decision_vals = cross_val_predict(
@@ -1223,20 +1444,21 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     plt.close(fig)
 
     # Decoding probability time-course (Claassen Fig. 3 equivalent)
+    t_min = np.arange(len(prob_keep)) * SUB_EPOCH_DUR / 60
     fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(prob_keep, color='steelblue', lw=1.0)
+    ax.plot(t_min, prob_keep, color='steelblue', lw=1.0)
     ax.axhline(0.5, color='k', ls='--', lw=0.8, label='Chance (0.5)')
-    ax.set(ylim=(0, 1), xlabel='Sub-epoch number (2 s each)',
+    ax.set(ylim=(0, 1), xlabel='Time (min)',
            ylabel='P("keep moving")',
            title=f'{subject_id}: SVM decoding probability  AUC={mean_auc_svm:.3f}  p={p_svm:.3f}')
     for i in range(n_pairs):
         keep_idx = np.where((sub_groups == i) & (sub_labels == 1))[0]
         stop_idx  = np.where((sub_groups == i) & (sub_labels == 0))[0]
         if len(keep_idx):
-            ax.axvline(keep_idx[0] - 0.5, color='green', lw=1.0, alpha=0.7,
+            ax.axvline(keep_idx[0] * SUB_EPOCH_DUR / 60, color='green', lw=1.0, alpha=0.7,
                        label='Keep onset' if i == 0 else None)
         if len(stop_idx):
-            ax.axvline(stop_idx[0] - 0.5, color='red', lw=1.0, alpha=0.7,
+            ax.axvline(stop_idx[0] * SUB_EPOCH_DUR / 60, color='red', lw=1.0, alpha=0.7,
                        label='Stop onset' if i == 0 else None)
     ax.legend(fontsize=8, loc='upper right')
     ax.grid(True, alpha=0.2)
@@ -1246,7 +1468,7 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
 
     # SVM spatial patterns
     clf_patterns = make_pipeline(
-        StandardScaler(), LinearModel(LinearSVC(max_iter=10000, dual=True))
+        StandardScaler(), LinearModel(LinearSVC(max_iter=10000, dual='auto'))
     )
     clf_patterns.fit(X_svm, sub_labels)
     patterns         = get_coef(clf_patterns, 'patterns_', inverse_transform=True)
@@ -1265,6 +1487,42 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     plt.tight_layout()
     fig.savefig(out_dir / f'{subject_id}_command_svm_patterns.png', dpi=150)
     plt.close(fig)
+
+    # Riemannian MDM classifier — operates on covariance matrices (SPD manifold).
+    # Consistently outperforms LinearSVC on PSD features on benchmark motor imagery datasets.
+    if HAS_PYRIEMANN:
+        print('  [command] Running Riemannian MDM classifier...')
+        cov_sub   = Covariances(estimator='lwf').fit_transform(data_sub)
+        riem_prob = cross_val_predict(
+            MDM(metric='riemann'), cov_sub, sub_labels,
+            cv=logo, groups=sub_groups, method='predict_proba',
+        )[:, 1]  # P(keep)
+        mean_auc_riem = roc_auc_score(sub_labels, riem_prob)
+
+        perm_riem = []
+        rng_riem  = np.random.default_rng(43)
+        for _ in range(N_PERMS_SVM):
+            perm_riem.append(roc_auc_score(rng_riem.permutation(sub_labels), riem_prob))
+        perm_riem = np.array(perm_riem)
+        p_riem    = (np.sum(perm_riem >= mean_auc_riem) + 1) / (N_PERMS_SVM + 1)
+        print(f'  [command] Riemannian MDM AUC={mean_auc_riem:.3f}  p={p_riem:.4f}  '
+              f'(SVM: {mean_auc_svm:.3f}  p={p_svm:.4f})')
+
+        fig_riem, ax_riem = plt.subplots(figsize=(8, 3))
+        ax_riem.hist(perm_riem, bins=30, color='steelblue', alpha=0.7, label='Permutation AUC')
+        ax_riem.axvline(mean_auc_riem, color='firebrick', lw=2,
+                        label=f'MDM observed: {mean_auc_riem:.3f}  (p={p_riem:.3f})')
+        ax_riem.axvline(0.5, color='k', lw=1, ls='--', label='Chance (0.5)')
+        ax_riem.set(xlabel='AUC', ylabel='Count',
+                    title=f'{subject_id}: Riemannian MDM permutation test')
+        ax_riem.legend(fontsize=9)
+        ax_riem.grid(True, alpha=0.3)
+        plt.tight_layout()
+        fig_riem.savefig(out_dir / f'{subject_id}_command_riemannian_null.png', dpi=150)
+        plt.close(fig_riem)
+    else:
+        print('  [command] pyriemann not installed — skipping Riemannian MDM '
+              '(pip install pyriemann)')
 
     print(f'  [command] Saved figures to {out_dir}')
 
