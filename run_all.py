@@ -1303,6 +1303,9 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         with np.errstate(divide='ignore', invalid='ignore'):
             erd_tfr = 10 * np.log10(tfr_k.data / (tfr_s.data + 1e-30))  # (n_ch, n_freq, n_t)
 
+        from scipy.ndimage import gaussian_filter as _gf
+        erd_tfr = _gf(erd_tfr, sigma=(0, 0.8, 1.5))  # smooth time + freq, not channels
+
         fig_tfr, axes_tfr = plt.subplots(
             1, len(MOTOR_CHANNELS), figsize=(5 * len(MOTOR_CHANNELS), 4),
         )
@@ -1443,28 +1446,114 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     fig.savefig(out_dir / f'{subject_id}_command_svm_null.png', dpi=150)
     plt.close(fig)
 
-    # Decoding probability time-course (Claassen Fig. 3 equivalent)
-    t_min = np.arange(len(prob_keep)) * SUB_EPOCH_DUR / 60
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(t_min, prob_keep, color='steelblue', lw=1.0)
-    ax.axhline(0.5, color='k', ls='--', lw=0.8, label='Chance (0.5)')
-    ax.set(ylim=(0, 1), xlabel='Time (min)',
-           ylabel='P("keep moving")',
-           title=f'{subject_id}: SVM decoding probability  AUC={mean_auc_svm:.3f}  p={p_svm:.3f}')
-    for i in range(n_pairs):
-        keep_idx = np.where((sub_groups == i) & (sub_labels == 1))[0]
-        stop_idx  = np.where((sub_groups == i) & (sub_labels == 0))[0]
-        if len(keep_idx):
-            ax.axvline(keep_idx[0] * SUB_EPOCH_DUR / 60, color='green', lw=1.0, alpha=0.7,
-                       label='Keep onset' if i == 0 else None)
-        if len(stop_idx):
-            ax.axvline(stop_idx[0] * SUB_EPOCH_DUR / 60, color='red', lw=1.0, alpha=0.7,
-                       label='Stop onset' if i == 0 else None)
-    ax.legend(fontsize=8, loc='upper right')
-    ax.grid(True, alpha=0.2)
+    # Band power comparison at motor channels — keep vs stop, per frequency band.
+    # Shows what the SVM is distinguishing: distribution of band power under each condition.
+    _motor_plot_chs = [ch for ch in ['C3', 'Cz', 'C4'] if ch in sub_epochs.ch_names]
+    fig_bp, axes_bp = plt.subplots(1, len(SVM_BANDS), figsize=(14, 4.5), sharey=False)
+    for _bi, (_ax_bp, (_flo, _fhi), _lbl) in enumerate(zip(axes_bp, SVM_BANDS, SVM_BAND_LABELS)):
+        _fidx = np.where((psd_freqs_svm >= _flo) & (psd_freqs_svm <= _fhi))[0]
+        _band_pow = psds_sub[:, :, _fidx].mean(axis=2) * 1e12  # (n_sub_ep, n_ch), pV²/Hz
+        _pos = 1.0
+        _all_pos, _all_data, _all_colors, _xtick_pos, _xtick_lbl = [], [], [], [], []
+        for _ch in _motor_plot_chs:
+            _ci = sub_epochs.ch_names.index(_ch)
+            _kp = _band_pow[sub_labels == 1, _ci]
+            _sp = _band_pow[sub_labels == 0, _ci]
+            _bp_obj = _ax_bp.boxplot(
+                [_kp, _sp], positions=[_pos, _pos + 0.55],
+                patch_artist=True, widths=0.4,
+                medianprops=dict(color='k', lw=2),
+                whiskerprops=dict(lw=1.2), capprops=dict(lw=1.2),
+                showfliers=False,
+            )
+            _bp_obj['boxes'][0].set_facecolor('#f5a623'); _bp_obj['boxes'][0].set_alpha(0.7)
+            _bp_obj['boxes'][1].set_facecolor('#4a90d9'); _bp_obj['boxes'][1].set_alpha(0.7)
+            _xtick_pos.append(_pos + 0.275)
+            _xtick_lbl.append(_ch)
+            _pos += 1.7
+        _ax_bp.set_xticks(_xtick_pos)
+        _ax_bp.set_xticklabels(_xtick_lbl, fontsize=10)
+        _ax_bp.set_title(f'{_lbl}  ({_flo}–{_fhi} Hz)', fontsize=10)
+        if _bi == 0:
+            _ax_bp.set_ylabel('Band power (pV²/Hz)', fontsize=9)
+        _ax_bp.grid(True, alpha=0.25, axis='y')
+        _ax_bp.set_xlim(0.4, _pos - 0.9)
+    # Shared legend
+    from matplotlib.patches import Patch as _BP
+    axes_bp[-1].legend(
+        handles=[_BP(facecolor='#f5a623', alpha=0.7, label='Keep (move)'),
+                 _BP(facecolor='#4a90d9', alpha=0.7, label='Stop (rest)')],
+        fontsize=9, loc='upper right',
+    )
+    fig_bp.suptitle(
+        f'{subject_id}: Band Power at Motor Channels — Keep vs Stop\n'
+        f'(each box = distribution across all sub-epochs; outliers hidden)',
+        fontsize=10,
+    )
     plt.tight_layout()
-    fig.savefig(out_dir / f'{subject_id}_command_decoding.png', dpi=150)
-    plt.close(fig)
+    fig_bp.savefig(out_dir / f'{subject_id}_command_psd_features.png', dpi=150)
+    plt.close(fig_bp)
+
+    # Decoding prediction per trial — Claassen 2019 Figure 3 style.
+    # Average the 5 sub-epochs within each keep or stop period so each trial
+    # contributes one keep value and one stop value. Plot as scatter + smoothed
+    # trend with a box-plot summary panel showing the overall separation.
+    from matplotlib.patches import Patch as _Patch
+    from scipy.ndimage import uniform_filter1d as _uf1d
+    _pk_map: dict = {}; _ps_map: dict = {}
+    for _i, (_pi, _lbl) in enumerate(zip(sub_groups, sub_labels)):
+        (_pk_map if _lbl == 1 else _ps_map).setdefault(_pi, []).append(prob_keep[_i])
+    _pairs_both = sorted(set(_pk_map) & set(_ps_map))
+    _pk = np.array([np.mean(_pk_map[_p]) for _p in _pairs_both])
+    _ps = np.array([np.mean(_ps_map[_p])  for _p in _pairs_both])
+    _xp = np.arange(1, len(_pairs_both) + 1)
+
+    fig_dec, (ax_sc, ax_bx) = plt.subplots(
+        1, 2, figsize=(14, 4.5), gridspec_kw={'width_ratios': [3, 1]},
+    )
+
+    # Scatter panel — one dot per trial per condition
+    ax_sc.axhline(0.5, color='k', ls='--', lw=0.8, zorder=1, label='Chance (0.5)')
+    ax_sc.scatter(_xp, _pk, color='#f5a623', s=18, alpha=0.65, zorder=3, label='Keep (move)')
+    ax_sc.scatter(_xp, _ps, color='#4a90d9', s=18, alpha=0.65, zorder=3, label='Stop (rest)')
+    _sm = max(5, len(_xp) // 8)  # smoothing window ~ 1/8 of trials
+    if len(_pk) >= _sm:
+        ax_sc.plot(_xp, _uf1d(_pk, size=_sm), color='#c87800', lw=2.0, zorder=4)
+        ax_sc.plot(_xp, _uf1d(_ps, size=_sm), color='#1a5ba0', lw=2.0, zorder=4)
+    ax_sc.set_ylim(0, 1)
+    ax_sc.set_xlim(0.5, len(_pairs_both) + 0.5)
+    ax_sc.set_xlabel('Trial (keep+stop pair)', fontsize=10)
+    ax_sc.set_ylabel('Decoding Prediction', fontsize=10)
+    ax_sc.text(0.01, 0.97, 'Move', transform=ax_sc.transAxes,
+               fontsize=9, ha='left', va='top', color='#555')
+    ax_sc.text(0.01, 0.03, 'Rest', transform=ax_sc.transAxes,
+               fontsize=9, ha='left', va='bottom', color='#555')
+    ax_sc.legend(fontsize=9, loc='upper right')
+    ax_sc.grid(True, alpha=0.2)
+
+    # Box panel — overall keep vs stop distribution
+    _bplt = ax_bx.boxplot(
+        [_pk, _ps], tick_labels=['Keep\n(move)', 'Stop\n(rest)'],
+        patch_artist=True, widths=0.5,
+        medianprops=dict(color='k', lw=2),
+        whiskerprops=dict(lw=1.2), capprops=dict(lw=1.2),
+        showfliers=False,
+    )
+    _bplt['boxes'][0].set_facecolor('#f5a623'); _bplt['boxes'][0].set_alpha(0.7)
+    _bplt['boxes'][1].set_facecolor('#4a90d9'); _bplt['boxes'][1].set_alpha(0.7)
+    ax_bx.axhline(0.5, color='k', ls='--', lw=0.8)
+    ax_bx.set_ylim(0, 1)
+    ax_bx.set_ylabel('Prediction', fontsize=10)
+    ax_bx.grid(True, alpha=0.25, axis='y')
+
+    fig_dec.suptitle(
+        f'{subject_id}: SVM Decoding — Keep vs Stop  '
+        f'AUC={mean_auc_svm:.3f}  p={p_svm:.3f}',
+        fontsize=11,
+    )
+    plt.tight_layout()
+    fig_dec.savefig(out_dir / f'{subject_id}_command_decoding.png', dpi=150)
+    plt.close(fig_dec)
 
     # SVM spatial patterns
     clf_patterns = make_pipeline(

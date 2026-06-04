@@ -496,6 +496,37 @@ ANALYSES = {
                 ),
             },
             {
+                'suffix': '_command_right_tfr.png',
+                'title':  'Right Hand Command: When and at What Frequency Does Suppression Emerge?',
+                'description': (
+                    'This time-frequency map shows brain activity at each electrode across the '
+                    'full 10-second imagery window, comparing keep versus stop. Blue regions mean '
+                    'brain activity was lower during "keep" than "stop" (suppression); red means '
+                    'it was higher. The gold dashed lines mark the mu rhythm (8-12 Hz) and the '
+                    'green lines mark the beta rhythm (14-30 Hz). A positive response shows '
+                    'clear blue bands in those frequency ranges beginning shortly after the '
+                    'command and sustained through the imagery period, strongest at C3 (the '
+                    'electrode over the left motor cortex, contralateral to the right hand).'
+                ),
+                'citation': (
+                    'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
+                    'patients with acute brain injury. NEJM, 380(26), 2497-2505.'
+                ),
+            },
+            {
+                'suffix': '_command_left_tfr.png',
+                'title':  'Left Hand Command: When and at What Frequency Does Suppression Emerge?',
+                'description': (
+                    'The same time-frequency analysis for the left-hand command. A positive '
+                    'response should show suppression (blue) in the mu and beta bands at C4 '
+                    '(right motor cortex, contralateral to the left hand).'
+                ),
+                'citation': (
+                    'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
+                    'patients with acute brain injury. NEJM, 380(26), 2497-2505.'
+                ),
+            },
+            {
                 'suffix': '_command_svm_null.png',
                 'title':  'Can a Computer Tell "Keep" from "Stop" Using the Brain Signal?',
                 'description': (
@@ -504,7 +535,7 @@ ANALYSES = {
                     'is expressed as an AUC score: 0.5 means pure chance (the algorithm cannot '
                     'tell the conditions apart), while 1.0 means perfect classification. To '
                     'confirm the result is real and not a statistical fluke, we repeated the test '
-                    '200 times with randomly shuffled labels. The blue histogram shows the range '
+                    '500 times with randomly shuffled labels. The blue histogram shows the range '
                     'of scores expected by chance. The red line sitting clearly above the bulk of '
                     'the histogram (p < 0.05) means the brain signal reliably distinguishes the '
                     'two commands, meeting the published criterion for Cognitive-Motor Dissociation '
@@ -514,6 +545,46 @@ ANALYSES = {
                     'Claassen, J. et al. (2019). NEJM, 380(26), 2497-2505. '
                     'Haufe, S. et al. (2014). On the interpretation of weight vectors of linear '
                     'models in multivariate neuroimaging. NeuroImage, 87, 96-110.'
+                ),
+            },
+            {
+                'suffix': '_command_psd_features.png',
+                'title':  'What the Classifier Sees: Brain Power Across Sub-Epochs and Electrodes',
+                'description': (
+                    'Each panel shows the raw power measurements that the machine-learning '
+                    'algorithm uses to make its decision, across four frequency bands. Each '
+                    'column is one 2-second sub-epoch; each row is one electrode. Columns '
+                    'alternate between "keep" and "stop" sub-epochs within each trial pair '
+                    '(thin vertical lines mark trial boundaries). If the classifier is picking '
+                    'up a genuine motor imagery signal, the keep and stop columns should appear '
+                    'visibly different in the alpha and beta panels, particularly at the central '
+                    'electrodes (C3, Cz, C4). Uniform colouring across all sub-epochs suggests '
+                    'the classifier is working at chance level.'
+                ),
+                'citation': (
+                    'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
+                    'patients with acute brain injury. NEJM, 380(26), 2497-2505.'
+                ),
+            },
+            {
+                'suffix': '_command_decoding.png',
+                'title':  'Decoding Time-Course: Does the Brain Track the Command Sequence?',
+                'description': (
+                    'Replicating Figure 3 from Claassen et al. (2019). Each numbered unit on '
+                    'the x-axis is one keep+stop trial pair. Within each trial the orange-shaded '
+                    'left half is the motor imagery (move) period and the unshaded right half is '
+                    'the rest period; the solid and dotted lines below the axis mark these '
+                    'periods. The y-axis shows the classifier\'s prediction that the brain is in '
+                    'the "move" state: values near 1.0 mean the brain signal looked like motor '
+                    'imagery, values near 0.0 mean it looked like rest, and 0.5 is chance. A '
+                    'patient whose brain is following the commands will show the curve rising '
+                    'during orange periods and falling during white periods, producing the '
+                    'characteristic oscillating pattern seen in healthy controls in the paper. '
+                    'A flat line near 0.5 throughout indicates no detectable response.'
+                ),
+                'citation': (
+                    'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
+                    'patients with acute brain injury. NEJM, 380(26), 2497-2505.'
                 ),
             },
             {
