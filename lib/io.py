@@ -165,3 +165,42 @@ def align_stimulus_csv(
     df["end_sample"] = (df["edf_end"] * sfreq).astype(int).clip(0, n_times - 1)
 
     return df, time_offset
+
+
+# Housekeeping rows whose edf_start/edf_end are not meaningful stimulus onsets —
+# the alignment transform above runs uniformly across every row for simplicity,
+# so e.g. a sync_detection row ends up with start_time (an EDF-time value) plus
+# time_offset added a second time, producing a nonsensical edf_start. Consumers
+# that need "the first delivered stimulus" must exclude these rows first.
+NON_STIMULUS_TYPES = ('sync_detection', 'manual_sync_pulse', 'session_note', 'stimulus_paused')
+
+
+def first_paradigm_onset(df: pd.DataFrame) -> float | None:
+    """EDF time (seconds) of the first delivered stimulus, or None if unknown.
+
+    Used to size the pre-paradigm resting-state window (spindles, resting-state
+    suite). Excludes sync pulses, pauses, and session notes — see NON_STIMULUS_TYPES.
+    """
+    if 'edf_start' not in df.columns:
+        return None
+    onset = df.loc[~df['stim_type'].isin(NON_STIMULUS_TYPES), 'edf_start'].dropna().min()
+    return float(onset) if pd.notna(onset) else None
+
+
+def _crop_to_paradigm(raw, df: pd.DataFrame, stim_mask,
+                      pre_s: float = 5.0, post_s: float = 5.0):
+    """Return a copy of raw cropped to the span of matching stimulus events +/- buffers.
+
+    Filtering a 5–15 min paradigm segment is 5–10x faster than filtering a full
+    session recording. MNE preserves first_samp after cropping, so absolute sample
+    numbers in the events array computed from edf_time * sfreq remain valid.
+
+    pre_s / post_s should be >= the widest epoch window used for that analysis
+    (e.g. Johnsen uses -2 to +2 s, so pre_s=5 is safe for oddball).
+    """
+    seg = df[stim_mask]
+    if seg.empty:
+        return raw
+    t0 = max(0.0, float(seg['edf_start'].min()) - pre_s)
+    t1 = min(float(raw.times[-1]), float(seg['edf_start'].max()) + post_s)
+    return raw.copy().crop(tmin=t0, tmax=t1)
