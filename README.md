@@ -41,14 +41,16 @@ Each notebook is self-contained. Set `SUBJECT_ID` and `SESSION_DATE` in the conf
 
 | Notebook | Paradigm | Analysis | Positive finding |
 | --- | --- | --- | --- |
-| `oddball_p300_erp.ipynb` | Oddball | P300 ERP at 300–600 ms + permutation test | Cognitive detection of deviant tone |
-| `language_tracking_itpc.ipynb` | Language | ITPC at 0.78 / 1.56 / 3.125 Hz + permutation test | Neural entrainment to speech rhythm |
-| `command_following_erd_svm.ipynb` | Motor command | Mu/beta ERD at C3/C4 + SVM | Lateralized motor imagery response |
-| `voice_familiarity_erp.ipynb` | Loved one voice | Familiarity ERP at 300–600 ms + permutation test | Implicit memory / emotional processing |
+| `oddball_p300.ipynb` | Oddball | P300 ERP at 300–600 ms + permutation test | Cognitive detection of deviant tone |
+| `language_tracking.ipynb` | Language | ITPC at 0.78 / 1.56 / 3.125 Hz + permutation test | Neural entrainment to speech rhythm |
+| `command_following.ipynb` | Motor command | Mu/beta ERD at C3/C4 + SVM | Lateralized motor imagery response |
+| `voice_familiarity.ipynb` | Loved one voice | Familiarity ERP at 300–600 ms + permutation test | Implicit memory / emotional processing |
 
 Requires a `manual_sync_pulse` + `sync_detection` row pair in the CSV for timestamp alignment.
 
 The oddball analysis additionally reports two complementary, additive single-trial measures alongside the ERP: delta-gamma phase-amplitude coupling at Pz (`_oddball_pac.png`) and Lempel-Ziv complexity (`_oddball_lzc.png`), plus an XDAWN+Riemannian-MDM single-trial classifier run alongside the existing SVM (`_oddball_xdawn_null.png`).
+
+The command-following SVM uses log-transformed PSD band-power features (EEG power is approximately log-normal) and the Riemannian MDM classifier clips raw amplitude to ±200µV before covariance estimation — both prevent rare electrode-artifact transients (e.g. a brief lead pop) from dominating the linear/covariance-based classifiers, without rejecting any epochs.
 
 ## Resting-state suite (optional)
 

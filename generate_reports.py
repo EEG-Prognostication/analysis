@@ -44,7 +44,7 @@ ANALYSES = {
     'oddball': {
         'pdf_name':   'report_oddball_p300.pdf',
         'title':      'Auditory Awareness Test',
-        'full_title': 'Auditory Awareness Test (Oddball P300)',
+        'full_title': 'Auditory Awareness Test',
         'overview': (
             'Background: One of the central challenges in caring for patients with severe brain '
             'injury is determining whether they retain any awareness of their surroundings, even '
@@ -465,6 +465,39 @@ ANALYSES = {
                 ],
             },
         ],
+        'glossary': [
+            ('p-value (permutation test)',
+             'Throughout this report, p-values come from permutation tests: the analysis is '
+             'repeated 500-1,000 times with trial labels (e.g. rare vs. standard) randomly '
+             'shuffled, building a distribution of results expected by chance alone. The '
+             'p-value is the fraction of shuffled results at least as extreme as the real '
+             'one. p < 0.05 is conventionally significant.'),
+            ('AUC / classification accuracy',
+             'A score from 0.5 (a coin flip) to 1.0 (always correct) summarising how well a '
+             'machine-learning classifier distinguishes two conditions using the EEG alone.'),
+            ('Single-trial SVM (Support Vector Machine)',
+             'A linear classifier trained to separate rare-tone trials from standard-tone '
+             'trials using the EEG pattern of each individual trial, then tested on a trial '
+             'it has never seen (leave-one-out cross-validation).'),
+            ('XDAWN + Riemannian MDM',
+             'A second, independent classifier purpose-built for ERPs. XDAWN learns electrode '
+             'combinations that make the P300 stand out; each trial is then summarised as a '
+             'covariance matrix (how all electrodes move together) and compared to the '
+             'typical rare/standard pattern using Minimum Distance to Riemannian Mean (MDM) -- '
+             'a geometry suited to these matrices. Agreement with the SVM strengthens '
+             'confidence in the result.'),
+            ('P3b Dipole Index',
+             'A single number capturing the simultaneous parietal-positive / frontal-negative '
+             'pattern that distinguishes a genuine P3b from the earlier automatic components.'),
+            ('Delta-gamma phase-amplitude coupling (PAC)',
+             'Measures whether fast gamma bursts (30-80 Hz) are organised by the phase of slow '
+             'delta waves (1-4 Hz) -- a cross-frequency signature linked in prior work to '
+             'conscious processing.'),
+            ('Lempel-Ziv complexity (LZC)',
+             'Borrowed from data compression: a more varied, less repetitive EEG signal '
+             'compresses less and scores higher. Captures single-trial richness that '
+             'disappears once trials are averaged together.'),
+        ],
     },
 
     'language': {
@@ -553,6 +586,9 @@ ANALYSES = {
         'pdf_name':   'report_command_following.pdf',
         'title':      'Command Following Test',
         'full_title': 'Command Following Test (Motor Imagery Brain Response)',
+        'extra_section_title': 'Feature & Classifier Comparison (Exploratory) -- '
+                                'methodology, cross-patient summary, and a per-patient '
+                                'chart for each of the figures above',
         'overview': (
             'Background: Some patients with severe brain injury retain the ability to understand '
             'and follow instructions internally, even though they cannot produce any visible '
@@ -598,17 +634,21 @@ ANALYSES = {
                 ),
             },
             {
-                'suffix': '_command_right_lateralization.png',
-                'title':  'Right Hand Command: Which Side of the Brain Responds?',
+                'suffixes': ('_command_right_lateralization.png', '_command_left_lateralization.png'),
+                'labels':   ('Right Hand Command', 'Left Hand Command'),
+                'dual':     True,
+                'title':  'Which Side of the Brain Responds to Each Hand?',
                 'description': (
-                    'When a person imagines squeezing their right hand, the motor response should '
-                    'be strongest on the left side of the brain (the brain controls the opposite '
-                    'side of the body). This figure shows the brain wave difference (keep minus '
-                    'stop) separately for three electrodes: C3 (left brain, labelled contra, '
-                    'expected to show the strongest drop), Cz (centre), and C4 (right brain, '
-                    'labelled ipsi, expected to show less change). If C3 shows a larger negative '
-                    'response than C4, this left-right pattern confirms the patient is specifically '
-                    'following the right-hand instruction rather than reacting generally to the sounds.'
+                    'When a person imagines squeezing a hand, the motor response should be '
+                    'strongest on the opposite side of the brain (the brain controls the opposite '
+                    'side of the body). Each panel shows the brain wave difference (keep minus '
+                    'stop) at three electrodes: C3 (left brain), Cz (centre), and C4 (right '
+                    'brain). For the right-hand command (left panel), C3 is labelled "contra" and '
+                    'is expected to show the strongest drop; for the left-hand command (right '
+                    'panel), C4 is "contra." If each command produces its largest response on '
+                    'the expected opposite side, this double dissociation is strong evidence that '
+                    'the patient is specifically following each instruction rather than reacting '
+                    'generally to the sounds.'
                 ),
                 'citation': (
                     'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
@@ -616,45 +656,21 @@ ANALYSES = {
                 ),
             },
             {
-                'suffix': '_command_left_lateralization.png',
-                'title':  'Left Hand Command: Which Side of the Brain Responds?',
+                'suffixes': ('_command_right_tfr.png', '_command_left_tfr.png'),
+                'labels':   ('Right Hand Command', 'Left Hand Command'),
+                'dual':     True,
+                'title':  'When and at What Frequency Does Suppression Emerge?',
                 'description': (
-                    'The same analysis for the left-hand command. Here the response should be '
-                    'strongest on the right side of the brain (C4, labelled contra). If both the '
-                    'right-hand and left-hand commands produce the correct opposite-side brain '
-                    'response, this double dissociation is strong evidence that the patient is '
-                    'genuinely following each specific instruction.'
-                ),
-                'citation': (
-                    'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
-                    'patients with acute brain injury. NEJM, 380(26), 2497-2505.'
-                ),
-            },
-            {
-                'suffix': '_command_right_tfr.png',
-                'title':  'Right Hand Command: When and at What Frequency Does Suppression Emerge?',
-                'description': (
-                    'This time-frequency map shows brain activity at each electrode across the '
-                    'full 10-second imagery window, comparing keep versus stop. Blue regions mean '
-                    'brain activity was lower during "keep" than "stop" (suppression); red means '
-                    'it was higher. The gold dashed lines mark the mu rhythm (8-12 Hz) and the '
-                    'green lines mark the beta rhythm (14-30 Hz). A positive response shows '
-                    'clear blue bands in those frequency ranges beginning shortly after the '
-                    'command and sustained through the imagery period, strongest at C3 (the '
-                    'electrode over the left motor cortex, contralateral to the right hand).'
-                ),
-                'citation': (
-                    'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
-                    'patients with acute brain injury. NEJM, 380(26), 2497-2505.'
-                ),
-            },
-            {
-                'suffix': '_command_left_tfr.png',
-                'title':  'Left Hand Command: When and at What Frequency Does Suppression Emerge?',
-                'description': (
-                    'The same time-frequency analysis for the left-hand command. A positive '
-                    'response should show suppression (blue) in the mu and beta bands at C4 '
-                    '(right motor cortex, contralateral to the left hand).'
+                    'These time-frequency maps show brain activity at each electrode across the '
+                    'full 10-second imagery window, comparing keep versus stop, for the '
+                    'right-hand command (left panel) and the left-hand command (right panel). '
+                    'Blue regions mean brain activity was lower during "keep" than "stop" '
+                    '(suppression); red means it was higher. The gold dashed lines mark the mu '
+                    'rhythm (8-12 Hz) and the green lines mark the beta rhythm (14-30 Hz). A '
+                    'positive response shows clear blue bands in those frequency ranges '
+                    'beginning shortly after the command and sustained through the imagery '
+                    'period -- strongest at C3 (left motor cortex) for the right-hand command, '
+                    'and at C4 (right motor cortex) for the left-hand command.'
                 ),
                 'citation': (
                     'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
@@ -683,6 +699,32 @@ ANALYSES = {
                 ),
             },
             {
+                'suffix': '_command_riemannian_null.png',
+                'title':  'A Second, Independent Classifier (Riemannian Geometry)',
+                'description': (
+                    'A second machine-learning approach, run alongside the one above, that '
+                    'looks at the EEG in a different way: instead of measuring power in '
+                    'specific frequency bands, it captures how all the electrodes move '
+                    'together moment-to-moment and asks whether that pattern of co-activity '
+                    'is closer to a typical "keep" pattern or a typical "stop" pattern '
+                    '(Minimum Distance to Riemannian Mean, or "MDM"). This approach is '
+                    'well established in brain-computer interface research and tends to be '
+                    'more stable than band-power classifiers when only a small number of '
+                    'trials is available. As above, AUC of 0.5 is chance and 1.0 is perfect; '
+                    'the red line sitting clearly to the right of the blue histogram '
+                    '(p < 0.05) means this second, independent method also reliably '
+                    'distinguishes "keep" from "stop." Agreement between the two methods '
+                    'strengthens confidence in the result.'
+                ),
+                'citations': [
+                    'Barachant, A. et al. (2013). Classification of covariance matrices '
+                    'using a Riemannian-based kernel for BCI applications. Neurocomputing, '
+                    '112, 172-178.',
+                    'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
+                    'patients with acute brain injury. NEJM, 380(26), 2497-2505.',
+                ],
+            },
+            {
                 'suffix': '_command_psd_features.png',
                 'title':  'What the Classifier Sees: Brain Power Across Sub-Epochs and Electrodes',
                 'description': (
@@ -702,20 +744,23 @@ ANALYSES = {
                 ),
             },
             {
-                'suffix': '_command_decoding.png',
+                'suffixes': ('_command_decoding.png', '_command_decoding_lr.png'),
+                'labels':   ('Linear SVM (Band Power)', 'Logistic Regression (Band Power)'),
+                'dual':     True,
                 'title':  'Decoding Time-Course: Does the Brain Track the Command Sequence?',
                 'description': (
-                    'Replicating Figure 3 from Claassen et al. (2019). Each numbered unit on '
-                    'the x-axis is one keep+stop trial pair. Within each trial the orange-shaded '
-                    'left half is the motor imagery (move) period and the unshaded right half is '
-                    'the rest period; the solid and dotted lines below the axis mark these '
-                    'periods. The y-axis shows the classifier\'s prediction that the brain is in '
-                    'the "move" state: values near 1.0 mean the brain signal looked like motor '
-                    'imagery, values near 0.0 mean it looked like rest, and 0.5 is chance. A '
-                    'patient whose brain is following the commands will show the curve rising '
-                    'during orange periods and falling during white periods, producing the '
-                    'characteristic oscillating pattern seen in healthy controls in the paper. '
-                    'A flat line near 0.5 throughout indicates no detectable response.'
+                    'Inspired by Figure 3 from Claassen et al. (2019). Two different '
+                    'machine-learning algorithms -- a linear support-vector machine (top) and '
+                    'logistic regression (bottom) -- are both trained on the same brain '
+                    'wave-power features and asked to read "keep" (move) vs. "stop" (rest) from '
+                    'the EEG. Each numbered unit on the x-axis is one keep+stop trial pair: '
+                    'orange dots are the trial-averaged prediction during "keep," blue dots '
+                    'during "stop," with smoothed trend lines; the box plots on the right '
+                    'summarise the full distributions. The y-axis is the predicted probability '
+                    'that the brain was in the "move" state -- 0.5 is chance. Consistently '
+                    'higher orange than blue, in both panels, indicates the brain signal tracks '
+                    'the commands regardless of which algorithm is used. A flat overlap near 0.5 '
+                    'indicates no detectable response.'
                 ),
                 'citation': (
                     'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
@@ -740,6 +785,38 @@ ANALYSES = {
                     'models in multivariate neuroimaging. NeuroImage, 87, 96-110.'
                 ),
             },
+        ],
+        'glossary': [
+            ('AUC and permutation p-value',
+             'As in the oddball report: AUC ranges from 0.5 (chance) to 1.0 (perfect '
+             'classification), and p-values come from repeating the classification 500 '
+             'times with shuffled keep/stop labels.'),
+            ('Event-Related Desynchronization (ERD)',
+             'A drop in EEG power in the mu (8-12 Hz) and/or beta (14-30 Hz) bands over the '
+             'motor cortex during movement or motor imagery, expressed in decibels (dB). '
+             'Negative values during "keep" are the expected pattern.'),
+            ("Cohen's d",
+             'A standardised effect size: how large the keep-vs-stop difference is relative '
+             'to trial-to-trial variability. By convention, ~0.2 / 0.5 / 0.8 correspond to '
+             'small / medium / large effects.'),
+            ('Lateralization Index (LI)',
+             'Compares ERD at the electrode over the side of the brain expected to respond '
+             '(contralateral to the commanded hand) against the opposite (ipsilateral) '
+             'electrode. +1 = all suppression on the expected side; 0 = no preference; '
+             'negative = unexpected side.'),
+            ('Linear SVM on band-power features',
+             'A classifier that reads EEG power across four frequency bands at each motor '
+             'electrode in 2-second windows and learns to predict "keep" vs. "stop."'),
+            ('Logistic Regression on band-power features',
+             'A second, simpler classifier trained on the same band-power features as the '
+             'Linear SVM above. Where the SVM finds the boundary that best separates "keep" '
+             'from "stop," logistic regression estimates the probability of "keep" directly. '
+             'Agreement between the two suggests the result is not an artifact of one '
+             'particular algorithm.'),
+            ('Riemannian MDM (Minimum Distance to Riemannian Mean)',
+             'A second, independent classifier (described in the oddball report) that '
+             'compares the covariance pattern across all electrodes -- how they move '
+             'together -- rather than band power alone.'),
         ],
     },
 
@@ -1157,22 +1234,28 @@ def _wrap_txt(p: FPDF, x: float, y: float, text: str,
     return p.get_y() - y
 
 
-def _place_img(p: FPDF, img_path: Path, top: float, max_h: float) -> None:
-    """Embed PNG directly, centred in TEXT_W x max_h box, aspect-ratio preserved.
+def _place_img_box(p: FPDF, img_path: Path, x: float, top: float,
+                    max_w: float, max_h: float) -> None:
+    """Embed PNG centred in an x/max_w x top/max_h box, aspect-ratio preserved.
 
     Opens the image once via PIL and passes the object to fpdf2 — avoids a second
     file read compared to passing a path string.
     """
     im, w_nat, h_nat = _open_img(img_path)
     aspect = w_nat / h_nat
-    if TEXT_W / max_h >= aspect:
+    if max_w / max_h >= aspect:
         dh, dw = max_h, max_h * aspect
     else:
-        dw, dh = TEXT_W, TEXT_W / aspect
-    x = MARGIN + (TEXT_W - dw) / 2
-    y = top   + (max_h - dh)  / 2
-    p.image(im, x=x, y=y, w=dw, h=dh)
+        dw, dh = max_w, max_w / aspect
+    px = x   + (max_w - dw) / 2
+    py = top + (max_h - dh) / 2
+    p.image(im, x=px, y=py, w=dw, h=dh)
     im.close()
+
+
+def _place_img(p: FPDF, img_path: Path, top: float, max_h: float) -> None:
+    """Embed PNG directly, centred in TEXT_W x max_h box, aspect-ratio preserved."""
+    _place_img_box(p, img_path, MARGIN, top, TEXT_W, max_h)
 
 
 # ── Page builders ──────────────────────────────────────────────────────────────
@@ -1204,9 +1287,22 @@ def _resting_metadata_note(md: dict) -> str:
     return '  '.join(parts)
 
 
+def _command_metadata_note(rj: dict) -> str:
+    parts = [f'Schema: {rj.get("schema", "?")}.',
+             f'Epochs analysed: {rj.get("n_keep_epochs", "?")} keep / '
+             f'{rj.get("n_stop_epochs", "?")} stop.']
+    bg = rj.get('background_screen') or {}
+    if bg:
+        status = 'pass' if bg.get('pass') else 'FLAGGED -- ' + '; '.join(bg.get('flags', []))
+        parts.append(f'Background quality screen: {status}.')
+    return '  '.join(parts)
+
+
 def _metadata_note(md: dict) -> str:
     if 'rest_duration_min' in md:
         return _resting_metadata_note(md)
+    if 'erd' in md and 'svm_result' in md:
+        return _command_metadata_note(md)
     parts = []
     n_rare_pre  = md.get('n_rare_pre_rejection')
     n_rare_post = md.get('n_rare_post_rejection')
@@ -1281,6 +1377,179 @@ def title_page(p: FPDF, adef: dict, patient_ids: list, date_str: str) -> None:
     for fd in adef['figures']:
         y += _txt(p, MARGIN + 0.15, y, f'- {fd["title"]}', size=10) + 0.04
 
+    extra_section = adef.get('extra_section_title')
+    if extra_section:
+        y += 0.18
+        y += _txt(p, MARGIN, y, 'Additional section in this report', size=11, style='B') + 0.12
+        y += _wrap_txt(p, MARGIN + 0.15, y, f'- {extra_section}', size=10,
+                       max_w=TEXT_W - 0.15, line_spacing=1.5) + 0.04
+
+
+def glossary_page(p: FPDF, adef: dict) -> None:
+    glossary = adef.get('glossary')
+    if not glossary:
+        return
+    p.add_page()
+    y = 0.55
+    y += _txt(p, MARGIN, y, 'Methods Glossary', size=13, style='B') + 0.06
+    y += _txt(p, MARGIN, y,
+              'Plain-English definitions of statistical and machine-learning terms used '
+              'in this report.', size=9, color=(100, 100, 100)) + 0.10
+    _rule(p, y); y += 0.16
+    for term, definition in glossary:
+        y += _txt(p, MARGIN, y, term, size=10, style='B') + 0.03
+        y += _wrap_txt(p, MARGIN, y, definition, size=9, line_spacing=1.5) + 0.14
+
+
+# ── Command report: exploratory feature/classifier comparison ──────────────────
+
+_COMPARISON_INTRO = (
+    'The classifiers shown earlier in this patient\'s section -- a linear SVM on '
+    'band-power features, and a Riemannian MDM classifier on electrode covariances '
+    '-- are the production pipeline. As a methodology check, the identical '
+    'keep-vs-stop decoding task (the same 48 trial-pairs / 480 two-second '
+    'sub-epochs and leave-one-group-out cross-validation) was repeated using '
+    'several alternative feature-extraction methods and two additional '
+    'classifiers, for all five analysable patients (CON010, CON012, CON013, '
+    'CON014, CON015). '
+    'This section presents those results alongside the methods themselves: first '
+    'a cross-patient summary, then each patient\'s own comparison chart. It is an '
+    'exploratory comparison and does not change or replace the production results.'
+)
+
+_COMPARISON_GLOSSARY = [
+    ('Band Power (PSD) features',
+     'Multitaper power in the delta, theta, alpha, and beta bands at each electrode, '
+     'averaged over each 2-second sub-epoch -- the same features used by the '
+     'production linear SVM, here paired with both a linear SVM and a Random Forest.'),
+    ('Common Spatial Patterns (CSP)',
+     'Learns electrode-weighting combinations ("spatial filters") that maximise the '
+     'power difference between the keep and stop conditions, then uses the '
+     'log-variance of the filtered signal as features.'),
+    ('Riemannian tangent space',
+     'Projects each sub-epoch covariance matrix from the curved space of symmetric '
+     'positive-definite matrices onto a flat tangent plane at the average covariance '
+     'matrix, producing a feature vector that standard classifiers can use directly. '
+     'The production Riemannian MDM classifier (shown earlier) classifies on the '
+     'curved space itself, without this projection.'),
+    ('Wavelet / time-frequency (TFR) features',
+     'Morlet wavelet power at C3, Cz, and C4 in the mu (8-12 Hz) and beta (14-30 Hz) '
+     'bands, computed separately for four consecutive bins within each 2-second '
+     'sub-epoch -- captures when within the window the power changes, rather than '
+     'only the average.'),
+    ('Random Forest',
+     "An ensemble of 200 decision trees, each trained on a random subset of the "
+     "data; the forest's prediction is the average across trees. Compared here "
+     'against the linear SVM used in the production pipeline for each feature set.'),
+    ('Logistic Regression',
+     'A linear classifier that fits feature weights to directly model the '
+     'probability of "keep" vs "stop", trained on the same RobustScaler-scaled '
+     'features as the linear SVM. Compared here as a second linear baseline '
+     'alongside the linear SVM and Random Forest for each feature set.'),
+    ('Shrinkage LDA',
+     'Linear Discriminant Analysis with automatic (Ledoit-Wolf) shrinkage of '
+     'the covariance estimate, trained on the same RobustScaler-scaled '
+     'features as the linear SVM and Logistic Regression. A third linear '
+     'baseline that tends to be more stable than plain LDA when the number '
+     'of features is large relative to the number of training examples, as '
+     'is the case here.'),
+    ('Bootstrap 95% confidence interval',
+     'The 48 trial-pairs are resampled with replacement 2,000 times and the AUC '
+     'recomputed each time; the interval covers the middle 95% of those AUC values. '
+     'Quantifies how much the AUC could plausibly vary given only 48 independent '
+     'trial-pairs, since the 480 sub-epoch predictions used to compute AUC are '
+     'correlated within each pair.'),
+]
+
+_COMPARISON_CITATIONS = [
+    'Barachant, A. et al. (2012). Multiclass brain-computer interface '
+    'classification by Riemannian geometry. IEEE Transactions on Biomedical '
+    'Engineering, 59(4), 920-928.',
+    'Ramoser, H., Muller-Gerking, J., and Pfurtscheller, G. (2000). Optimal '
+    'spatial filtering of single trial EEG during imagined hand movement. '
+    'IEEE Transactions on Rehabilitation Engineering, 8(4), 441-446.',
+    'Breiman, L. (2001). Random forests. Machine Learning, 45(1), 5-32.',
+    'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
+    'patients with acute brain injury. NEJM, 380(26), 2497-2505.',
+]
+
+_COMPARISON_HEATMAP_FIG = {
+    'title': 'Feature x Classifier Comparison Across All Patients',
+    'description': (
+        'Each cell shows the leave-one-group-out cross-validated AUC for one '
+        'feature-extraction/classifier combination (rows) for one patient (columns), '
+        'colour-scaled from 0.4 (red, near or below chance) to 0.85 (green, strong '
+        'separation). An asterisk marks combinations with a permutation p-value '
+        'below 0.05. The same seventeen combinations and the identical 48 trial-pairs / '
+        'cross-validation scheme are used for every patient, matching the '
+        'per-patient comparison charts that follow -- this summary makes it '
+        'possible to see whether any feature-extraction method or classifier is '
+        'consistently stronger or weaker across the five analysable patients, or '
+        'whether the ranking is patient-specific.'
+    ),
+    'citations': _COMPARISON_CITATIONS,
+}
+
+_COMPARISON_BARCHART_FIG = {
+    'title': 'This Patient\'s Comparison: Feature x Classifier AUC',
+    'description': (
+        'The same keep-vs-stop decoding task as the production classifiers shown '
+        'earlier in each patient\'s section -- identical 48 trial-pairs, identical '
+        '2-second sub-epochs, identical leave-one-group-out cross-validation -- '
+        'repeated with seventeen combinations of feature-extraction method and '
+        'classifier (see glossary above). "Band Power - Linear SVM" uses the same '
+        'features as the production SVM; "Covariance - Riemannian MDM" is the same '
+        'classifier as the production Riemannian result. The remaining fifteen '
+        'combinations -- Band Power with Random Forest, Logistic Regression, and '
+        'Shrinkage LDA, plus CSP, Tangent Space, and Wavelet/TFR features each with '
+        'a linear SVM, a Random Forest, a Logistic Regression, and a Shrinkage LDA '
+        '-- are additional, exploratory methods. '
+        'Error bars are 95% bootstrap confidence intervals from resampling the 48 '
+        'trial-pairs (2,000 resamples); the number above each bar is a permutation '
+        'p-value from 200 label-shuffles. This is an exploratory methodology '
+        'comparison and does not change the production results.'
+    ),
+    'citations': _COMPARISON_CITATIONS,
+}
+
+
+def feature_comparison_section(p: FPDF, cit_to_num: dict, patients: dict) -> None:
+    """Exploratory feature/classifier comparison section -- command report only.
+
+    Methodology page, the cross-patient AUC heatmap, then each analysable
+    patient's own feature x classifier bar chart -- all exploratory comparison
+    content lives together here rather than being scattered through each
+    patient's figure deck.
+    """
+    heatmap_path = RESULTS_DIR / 'feature_comparison_heatmap.png'
+    if not heatmap_path.exists():
+        return
+
+    p.add_page()
+    y = 0.55
+    y += _txt(p, MARGIN, y, 'Feature & Classifier Comparison (Exploratory)',
+              size=13, style='B') + 0.06
+    y += _wrap_txt(p, MARGIN, y, _COMPARISON_INTRO, size=10, line_spacing=1.6) + 0.10
+    _rule(p, y); y += 0.16
+    for term, definition in _COMPARISON_GLOSSARY:
+        y += _txt(p, MARGIN, y, term, size=10, style='B') + 0.03
+        y += _wrap_txt(p, MARGIN, y, definition, size=9, line_spacing=1.5) + 0.14
+
+    nums = [cit_to_num[c] for c in _fig_citations(_COMPARISON_HEATMAP_FIG) if c in cit_to_num]
+    figure_page(p, heatmap_path, 'All Patients', _COMPARISON_HEATMAP_FIG, citation_nums=nums,
+                header_label='Feature & Classifier Comparison (Exploratory)')
+
+    nums = [cit_to_num[c] for c in _fig_citations(_COMPARISON_BARCHART_FIG) if c in cit_to_num]
+    items = []
+    for patient_id, pngs in patients.items():
+        matches = [v for k, v in pngs.items() if k.endswith('_command_feature_comparison.png')]
+        if matches:
+            items.append((patient_id, matches[0]))
+    if items:
+        items = comparison_intro_page(p, items, citation_nums=nums)
+        for i in range(0, len(items), 2):
+            comparison_grid_page(p, items[i:i + 2])
+
 
 def patient_divider(p: FPDF, patient_id: str, analysis_title: str,
                     metadata: dict = None) -> None:
@@ -1290,15 +1559,15 @@ def patient_divider(p: FPDF, patient_id: str, analysis_title: str,
     _txt(p, MARGIN, mid - 0.38, patient_id, size=28, style='B', align='C')
     _txt(p, MARGIN, mid + 0.08, analysis_title, size=14, align='C')
     _rule(p, mid + 0.35)
+    y = mid + 0.48
     if metadata:
         note = _metadata_note(metadata)
         if note:
-            _wrap_txt(p, MARGIN + 0.5, mid + 0.48, note,
-                      size=9, style='I', max_w=TEXT_W - 1.0)
+            _wrap_txt(p, MARGIN + 0.5, y, note, size=9, style='I', max_w=TEXT_W - 1.0)
 
 
 def figure_page(p: FPDF, img_path: Path, patient_id: str,
-                fig_def: dict, citation_nums: list = None) -> None:
+                fig_def: dict, citation_nums: list = None, header_label: str = None) -> None:
     HEADER_H      = 0.55
     IMG_PAD       = 0.20
     BOTTOM_MARGIN = 0.50
@@ -1314,9 +1583,9 @@ def figure_page(p: FPDF, img_path: Path, patient_id: str,
 
     p.add_page()
 
-    # Header: patient left, figure title right
+    # Header: left label (patient ID, or an override section label), figure title right
     lh_hdr = 10 * 1.4 / 72
-    _txt(p, MARGIN, MARGIN / 2, f'Patient: {patient_id}', size=10, style='B', align='L')
+    _txt(p, MARGIN, MARGIN / 2, header_label or f'Patient: {patient_id}', size=10, style='B', align='L')
     _txt(p, MARGIN, MARGIN / 2, fig_def['title'], size=10, align='R')
     _rule(p, rule_y)
 
@@ -1333,9 +1602,138 @@ def figure_page(p: FPDF, img_path: Path, patient_id: str,
     _wrap_txt(p, MARGIN, y, desc, size=9, line_spacing=1.55)
 
 
-def references_page(p: FPDF, adef: dict) -> None:
+def figure_page_dual(p: FPDF, img_path_a: Path, img_path_b: Path, patient_id: str,
+                      fig_def: dict, label_a: str, label_b: str,
+                      citation_nums: list = None) -> None:
+    """Stacked (top/bottom) variant of figure_page for a left/right pair of figures.
+
+    These figures (TFR, lateralization) are wide and short (aspect ~3-3.75:1);
+    side by side at half page width shrank them to ~1 in tall. Stacking at full
+    page width roughly doubles each panel's rendered size.
+    """
+    HEADER_H      = 0.55
+    IMG_PAD       = 0.20
+    LABEL_H       = 0.22
+    BOTTOM_MARGIN = 0.50
+
+    desc      = fig_def['description']
+    n_lines   = len(textwrap.fill(desc, width=90).split('\n'))
+    caption_h = max(1.0, 0.55 + n_lines * 9 * 1.55 / 72)
+
+    rule_y     = MARGIN / 2 + HEADER_H
+    cap_rule_y = PAGE_H - BOTTOM_MARGIN - caption_h
+    avail      = cap_rule_y - rule_y
+    panel_h    = (avail - 3 * IMG_PAD - 2 * LABEL_H) / 2
+
+    p.add_page()
+
+    # Header: patient left, figure title right
+    _txt(p, MARGIN, MARGIN / 2, f'Patient: {patient_id}', size=10, style='B', align='L')
+    _txt(p, MARGIN, MARGIN / 2, fig_def['title'], size=10, align='R')
+    _rule(p, rule_y)
+
+    # Top panel: label + image
+    p.set_font('Helvetica', style='B', size=10)
+    top_a = rule_y + IMG_PAD
+    p.set_xy(MARGIN, top_a)
+    p.cell(w=TEXT_W, h=10 * 1.4 / 72, text=_n(label_a), align='C')
+    _place_img_box(p, img_path_a, MARGIN, top_a + LABEL_H, TEXT_W, panel_h)
+
+    # Bottom panel: label + image
+    top_b = top_a + LABEL_H + panel_h + IMG_PAD
+    p.set_xy(MARGIN, top_b)
+    p.cell(w=TEXT_W, h=10 * 1.4 / 72, text=_n(label_b), align='C')
+    _place_img_box(p, img_path_b, MARGIN, top_b + LABEL_H, TEXT_W, panel_h)
+
+    # Caption
+    _rule(p, cap_rule_y)
+    title_text = fig_def['title']
+    if citation_nums:
+        title_text += '  ' + ', '.join(f'[{n}]' for n in sorted(citation_nums))
+    y = cap_rule_y + 0.06
+    y += _txt(p, MARGIN, y, title_text, size=10, style='B') + 0.06
+    _wrap_txt(p, MARGIN, y, desc, size=9, line_spacing=1.55)
+
+
+_CMP_IMG_PAD       = 0.20
+_CMP_LABEL_H       = 0.22
+_CMP_BOTTOM_MARGIN = 0.50
+
+
+def _comparison_panel_h() -> float:
+    """Fixed height for one per-patient Feature x Classifier comparison chart --
+    the size that fits two per page on comparison_grid_page. Shared with
+    comparison_intro_page so a chart placed there is the same size as the rest.
+    """
+    top   = MARGIN / 2 + 0.55 + 0.16
+    avail = PAGE_H - top - _CMP_BOTTOM_MARGIN
+    return (avail - 3 * _CMP_IMG_PAD - 2 * _CMP_LABEL_H) / 2
+
+
+def comparison_intro_page(p: FPDF, items: list, citation_nums: list = None) -> list:
+    """Page with the shared Feature x Classifier comparison title + description,
+    followed by as many per-patient comparison charts -- at full, un-shrunk
+    size -- as fit below it. Returns the remaining items for comparison_grid_page.
+    """
+    HEADER_H = 0.55
+    p.add_page()
+    rule_y = MARGIN / 2 + HEADER_H
+
+    _txt(p, MARGIN, MARGIN / 2, 'Feature & Classifier Comparison (Exploratory)',
+         size=10, style='B', align='L')
+    _rule(p, rule_y)
+
+    title_text = _COMPARISON_BARCHART_FIG['title']
+    if citation_nums:
+        title_text += '  ' + ', '.join(f'[{n}]' for n in sorted(citation_nums))
+    y = rule_y + 0.16
+    y += _txt(p, MARGIN, y, title_text, size=12, style='B') + 0.08
+    y += _wrap_txt(p, MARGIN, y, _COMPARISON_BARCHART_FIG['description'], size=9.5, line_spacing=1.6)
+
+    panel_h = _comparison_panel_h()
+    block_h = _CMP_IMG_PAD + _CMP_LABEL_H + panel_h
+    n_fit   = min(len(items), max(0, int((PAGE_H - _CMP_BOTTOM_MARGIN - y) / block_h)))
+
+    for patient_id, img_path in items[:n_fit]:
+        y += _CMP_IMG_PAD
+        p.set_font('Helvetica', style='B', size=10)
+        p.set_xy(MARGIN, y)
+        p.cell(w=TEXT_W, h=10 * 1.4 / 72, text=_n(f'Patient: {patient_id}'), align='C')
+        _place_img_box(p, img_path, MARGIN, y + _CMP_LABEL_H, TEXT_W, panel_h)
+        y += _CMP_LABEL_H + panel_h
+
+    return items[n_fit:]
+
+
+def comparison_grid_page(p: FPDF, items: list) -> None:
+    """Page with one or two per-patient Feature x Classifier comparison
+    charts, stacked full-width and each labelled with its patient ID.
+
+    Each chart is rendered at a fixed size -- the same size used for the
+    chart on comparison_intro_page -- so every patient's chart is the same
+    size across the section, regardless of which page it falls on.
+    """
+    HEADER_H = 0.55
+    rule_y   = MARGIN / 2 + HEADER_H
+    p.add_page()
+
+    header = 'Feature & Classifier Comparison (Exploratory)'
+    _txt(p, MARGIN, MARGIN / 2, header, size=10, style='B', align='L')
+    _rule(p, rule_y)
+
+    panel_h = _comparison_panel_h()
+    y = rule_y + 0.16 + _CMP_IMG_PAD
+    for patient_id, img_path in items:
+        p.set_font('Helvetica', style='B', size=10)
+        p.set_xy(MARGIN, y)
+        p.cell(w=TEXT_W, h=10 * 1.4 / 72, text=_n(f'Patient: {patient_id}'), align='C')
+        _place_img_box(p, img_path, MARGIN, y + _CMP_LABEL_H, TEXT_W, panel_h)
+        y += _CMP_LABEL_H + panel_h + _CMP_IMG_PAD
+
+
+def references_page(p: FPDF, adef: dict, extra_figs: list = None) -> None:
     seen, unique = set(), []
-    for fd in adef['figures']:
+    for fd in adef['figures'] + (extra_figs or []):
         for c in _fig_citations(fd):
             if c and c not in seen:
                 seen.add(c); unique.append(c)
@@ -1380,22 +1778,40 @@ def build_report(analysis_key: str, adef: dict, date_str: str) -> None:
         return
     print(f'  Found {len(patients)} patient(s): {", ".join(patients)}')
 
+    extra_figs = [_COMPARISON_HEATMAP_FIG, _COMPARISON_BARCHART_FIG] if analysis_key == 'command' else None
+
     cit_to_num: dict = {}
-    for fd in adef['figures']:
+    for fd in adef['figures'] + (extra_figs or []):
         for c in _fig_citations(fd):
             if c and c not in cit_to_num:
                 cit_to_num[c] = len(cit_to_num) + 1
 
     p = _make_pdf()
     title_page(p, adef, list(patients.keys()), date_str)
+    glossary_page(p, adef)
+    if analysis_key == 'command':
+        feature_comparison_section(p, cit_to_num, patients)
 
     for patient_id, pngs in patients.items():
         meta_path = RESULTS_DIR / patient_id / analysis_key / 'metadata.json'
+        if not meta_path.exists():
+            meta_path = RESULTS_DIR / patient_id / analysis_key / 'results.json'
         metadata  = json.loads(meta_path.read_text()) if meta_path.exists() else None
         patient_divider(p, patient_id, adef['title'], metadata=metadata)
 
         included = 0
         for fd in adef['figures']:
+            if fd.get('dual'):
+                suf_a, suf_b = fd['suffixes']
+                match_a = [v for k, v in pngs.items() if k.endswith(suf_a)]
+                match_b = [v for k, v in pngs.items() if k.endswith(suf_b)]
+                if not match_a or not match_b:
+                    continue
+                nums = [cit_to_num[c] for c in _fig_citations(fd) if c in cit_to_num]
+                figure_page_dual(p, match_a[0], match_b[0], patient_id, fd,
+                                  fd['labels'][0], fd['labels'][1], citation_nums=nums)
+                included += 1
+                continue
             matches = [v for k, v in pngs.items() if k.endswith(fd['suffix'])]
             if not matches:
                 continue
@@ -1408,7 +1824,7 @@ def build_report(analysis_key: str, adef: dict, date_str: str) -> None:
             _txt(p, MARGIN, PAGE_H / 2, f'No figures found for {patient_id}.',
                  size=14, color=(136, 136, 136), align='C')
 
-    references_page(p, adef)
+    references_page(p, adef, extra_figs)
     p.output(str(pdf_path))
     print(f'  Saved: {pdf_path}')
 
@@ -1476,7 +1892,9 @@ def main() -> None:
     print(f'Results directory: {RESULTS_DIR}')
     print(f'Reports directory: {REPORTS_DIR}\n')
 
-    items = list(ANALYSES.items())
+    # 'language' is paused at the protocol level (see CLAUDE.md) and 'pooled_oddball'
+    # is not currently reviewed -- skip both report builds for now.
+    items = [(k, v) for k, v in ANALYSES.items() if k not in ('language', 'pooled_oddball')]
     n_workers = min(len(items), 4)
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
         futures = {ex.submit(_build_one, (key, adef, date_str)): key

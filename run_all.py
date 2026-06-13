@@ -23,6 +23,18 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use('Agg')  # headless — no display needed
+# Larger default text across every figure (oddball/language/command/resting/
+# spindles/pooled) -- applies to figures created in this process and in the
+# ProcessPoolExecutor workers below, which re-import this module on spawn.
+matplotlib.rcParams.update({
+    'font.size': 12,
+    'axes.titlesize': 15,
+    'axes.labelsize': 13,
+    'xtick.labelsize': 11,
+    'ytick.labelsize': 11,
+    'legend.fontsize': 11,
+    'figure.titlesize': 16,
+})
 import mne
 import pandas as pd
 
@@ -45,8 +57,8 @@ CSV_DIR     = REPO_ROOT / 'stimulus_software' / 'patient_data' / 'results'
 EDF_DIR     = REPO_ROOT / 'stimulus_software' / 'patient_data' / 'edfs'
 RESULTS_DIR = ANALYSIS_ROOT / 'results'
 
-ALL_ANALYSES      = ['oddball', 'language', 'command']   # run by default
-OPTIONAL_ANALYSES = ['spindles', 'resting']              # only when explicitly requested
+ALL_ANALYSES      = ['oddball', 'command']                 # run by default
+OPTIONAL_ANALYSES = ['language', 'spindles', 'resting']    # only when explicitly requested
 POOLED_ANALYSES   = ['pooled_oddball']
 DEFAULT_N_PERMS = 1000
 

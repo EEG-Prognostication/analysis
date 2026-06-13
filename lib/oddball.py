@@ -336,6 +336,50 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     labels      = epochs.events[:, 2]
     t_ep        = epochs.times
 
+    # Full pre-rejection event list (rare=2, standard=1) so each component's
+    # filtered epochs can be re-aligned to the autoreject-kept trials below.
+    odd_df  = df[df['stim_type'].str.startswith('oddball')].copy()
+    rare_df = odd_df[odd_df['notes'] == 'rare_tone']
+    std_df  = odd_df[odd_df['notes'] == 'standard_tone']
+    rare_events = np.column_stack([
+        rare_df['start_sample'].values,
+        np.zeros(len(rare_df), dtype=int),
+        np.full(len(rare_df), 2, dtype=int),
+    ])
+    std_events = np.column_stack([
+        std_df['start_sample'].values,
+        np.zeros(len(std_df), dtype=int),
+        np.full(len(std_df), 1, dtype=int),
+    ])
+    all_events = np.vstack([rare_events, std_events])
+    all_events = all_events[all_events[:, 0].argsort()]
+    kept_samples = epochs.events[:, 0]
+
+    _lp_cache: dict = {}
+    def _lp_epochs(lp):
+        """Epochs/evokeds for the kept trials, bandpassed at 0.1-{lp} Hz.
+
+        For lp >= 30 (no extra filtering beyond the base 0.1-30 Hz), reuses the
+        broadband epochs directly. For lp < 30, filters the CONTINUOUS pre-epoch
+        signal (as the bandwidth-comparison figures do) and re-epochs, then
+        selects the same autoreject-kept trials. Applying a 0.1-{lp} Hz filter
+        (filter length ~33 s) directly to a 1 s epoch array distorts the result.
+        """
+        if lp not in _lp_cache:
+            if lp >= 30:
+                _lp_cache[lp] = (epochs_data, evoked_rare, evoked_std)
+            else:
+                raw_lp = load_filtered_eeg(raw, available_eeg, l_freq=0.1, h_freq=lp, verbose=False)
+                raw_lp.set_eeg_reference('average', projection=False, verbose=False)
+                epochs_lp = mne.Epochs(
+                    raw_lp, events=all_events, event_id={'standard': 1, 'rare': 2},
+                    tmin=-0.2, tmax=0.8, baseline=(-0.2, 0), preload=True, verbose=False,
+                )
+                sample_to_idx = {s: i for i, s in enumerate(epochs_lp.events[:, 0])}
+                epochs_lp = epochs_lp[[sample_to_idx[s] for s in kept_samples]]
+                _lp_cache[lp] = (epochs_lp.get_data(), epochs_lp['rare'].average(), epochs_lp['standard'].average())
+        return _lp_cache[lp]
+
     _null_cache = out_dir / 'null_arrays.npz'
 
     if plots_only:
@@ -396,30 +440,6 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         N_PERMS         = n_perms
         COMPONENT_SEEDS = {'N1': 39, 'MMN': 40, 'P3a': 41, 'P3b': 42}
 
-        # Pre-filter epoch data to each component's bandwidth.
-        # Filtering is linear so filter(average) = average(filter) — stats and
-        # display plots are fully consistent. Cache by lowpass value to avoid
-        # redundant computation when components share a cutoff.
-        from mne.filter import filter_data as _fd
-        _filt_cache: dict = {}
-        def _comp_epochs(lp):
-            if lp not in _filt_cache:
-                _filt_cache[lp] = (
-                    epochs_data if lp >= 30
-                    else _fd(epochs_data, sfreq, l_freq=0.1, h_freq=lp, verbose=False)
-                )
-            return _filt_cache[lp]
-
-        _std_raw = epochs['standard'].get_data()
-        _std_cache: dict = {}
-        def _std_epochs(lp):
-            if lp not in _std_cache:
-                _std_cache[lp] = (
-                    _std_raw if lp >= 30
-                    else _fd(_std_raw, sfreq, l_freq=0.1, h_freq=lp, verbose=False)
-                )
-            return _std_cache[lp]
-
         perm_results = {}
         for name, comp in COMPONENTS.items():
             ch = comp['ch']
@@ -431,15 +451,14 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
             source   = comp.get('source', 'diff')
             rng      = np.random.default_rng(COMPONENT_SEEDS.get(name, 42))
             lp       = COMP_DISPLAY_LP[name]
+            cd, _, _ = _lp_epochs(lp)
 
             if source == 'standard':
-                std_data  = _std_epochs(lp)
-                per_epoch = std_data[:, ch_idx][:, win_mask].mean(axis=1) * 1e6
+                per_epoch = cd[labels == 1, ch_idx][:, win_mask].mean(axis=1) * 1e6
                 obs  = float(per_epoch.mean())
                 null = np.array([(rng.choice([-1, 1], size=len(per_epoch)) * per_epoch).mean()
                                  for _ in range(N_PERMS)])
             else:
-                cd = _comp_epochs(lp)
                 def _amp(data, labs, _ch=ch_idx, _win=win_mask):
                     return (data[labs == 2, _ch][:, _win].mean()
                             - data[labs == 1, _ch][:, _win].mean()) * 1e6
@@ -463,7 +482,7 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
             rng_fn  = np.random.default_rng(43)
 
             # Dipole Index is a P3b-window measure — use P3b's filter (0.1-10 Hz)
-            di_data = _comp_epochs(COMP_DISPLAY_LP['P3b'])
+            di_data, _, _ = _lp_epochs(COMP_DISPLAY_LP['P3b'])
 
             def _di_amp(data, labs, _par=par_idx, _fro=fro_idx, _mask=di_mask):
                 par_mean = data[:, _par, :][:, :, _mask].mean(axis=(1, 2)) * 1e6
@@ -564,11 +583,10 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         if not avail:
             continue
 
-        # Apply component-specific display filter to evoked copies only
+        # Component-specific display bandwidth — same filtered epochs used for stats
         lp = COMP_DISPLAY_LP.get(name, 30)
-        ev_rare_d = evoked_rare.copy().filter(l_freq=0.1, h_freq=lp, verbose=False)
-        ev_std_d  = evoked_std.copy().filter(l_freq=0.1,  h_freq=lp, verbose=False)
-        diff_d    = mne.combine_evoked([ev_rare_d, ev_std_d], weights=[1, -1])
+        _, ev_rare_d, ev_std_d = _lp_epochs(lp)
+        diff_d = mne.combine_evoked([ev_rare_d, ev_std_d], weights=[1, -1])
 
         if len(avail) > 3:
             ncols = 2
@@ -615,7 +633,8 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         par_avail = [ch for ch in par_chs if ch in diff_evoked.ch_names]
         fro_avail = [ch for ch in fro_chs if ch in diff_evoked.ch_names]
         if par_avail and fro_avail:
-            diff_fn_d = diff_evoked.copy().filter(l_freq=0.1, h_freq=10, verbose=False)
+            _, _ev_rare_fn, _ev_std_fn = _lp_epochs(10)
+            diff_fn_d = mne.combine_evoked([_ev_rare_fn, _ev_std_fn], weights=[1, -1])
             par_diff = np.mean(
                 [diff_fn_d.data[diff_fn_d.ch_names.index(ch)] for ch in par_avail], axis=0
             ) * 1e6
@@ -1065,8 +1084,11 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
                   f'(SVM: {svm_result["acc"]:.3f})')
 
             # Figure: null distribution
+            # Accuracy is discrete (multiples of 1/n_epochs); cap bins by unique
+            # values to avoid the narrow-bar comb pattern for small N (see SVM null above).
+            n_bins_xd = min(max(5, N_XDAWN_PERMS // 5), max(5, len(np.unique(np.round(null_xd, 4)))))
             fig_xd, ax_xd = plt.subplots(figsize=(10, 5))
-            ax_xd.hist(null_xd, bins=max(5, N_XDAWN_PERMS // 5),
+            ax_xd.hist(null_xd, bins=n_bins_xd,
                        color='steelblue', alpha=0.7,
                        label=f'Null ({N_XDAWN_PERMS} shuffles)')
             ax_xd.axvline(xdawn_acc, color='firebrick', lw=2,

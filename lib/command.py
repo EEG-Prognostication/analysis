@@ -7,6 +7,7 @@ Exports:
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -16,10 +17,11 @@ import mne
 import numpy as np
 import pandas as pd
 from scipy import stats
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import LeaveOneGroupOut, cross_val_predict
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 from sklearn.svm import LinearSVC
 from mne.decoding import LinearModel, get_coef
 from mne.time_frequency import psd_array_multitaper
@@ -129,22 +131,40 @@ def _measure_command_audio_durations() -> dict:
     return durations
 
 
-def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
-                df: pd.DataFrame, out_dir: Path, *, force: bool = False):
-    bg = _screen_background_eeg(raw, sfreq, available_eeg)
-    if bg['flags']:
-        for flag in bg['flags']:
-            print(f'  [command] BACKGROUND WARNING: {flag}')
-        print(f'  [command] Pathological background predicts zero CMD yield '
-              f'(Claassen 2025 medRxiv) — proceeding but interpret with caution')
-    else:
-        asym_str = f'{100 * bg["asymmetry"]:.0f}%' if not np.isnan(bg['asymmetry']) else 'n/a'
-        print(f'  [command] Background screen: pass  '
-              f'(suppression={100 * bg["suppression_frac"]:.0f}%  '
-              f'BS-CV={bg["bs_score"]:.2f}  asym={asym_str})')
+@dataclass
+class CommandSubEpochs:
+    """Return value of build_command_subepochs() — see that function's docstring."""
+    raw_erd: mne.io.BaseRaw
+    SCHEMA: str
+    keep_events: np.ndarray
+    stop_events: np.ndarray
+    keep_meta_df: pd.DataFrame
+    stop_meta_df: pd.DataFrame
+    MOTOR_CHANNELS: list
+    epochs_cmd: mne.Epochs
+    sub_epochs: mne.Epochs
+    data_sub: np.ndarray
+    sub_labels: np.ndarray
+    sub_groups: np.ndarray
+    X_svm: np.ndarray
+    psds_sub: np.ndarray
+    psd_freqs_svm: np.ndarray
+    SVM_BANDS: list
+    SVM_BAND_LABELS: list
 
-    # Background screen uses full raw (needs the pre-stimulus resting period).
-    # Crop to command events only AFTER the screen, before filtering.
+
+def build_command_subepochs(raw, sfreq: float, available_eeg: list,
+                             df: pd.DataFrame) -> CommandSubEpochs | None:
+    """Crop/filter raw, detect command schema, reconstruct keep/stop events, and
+    build the 2s sub-epochs used for the SVM/Riemannian classifiers.
+
+    Shared by run_command (production pipeline) and exploratory feature/classifier
+    comparisons (explore_command_classifiers.py) — both need the identical
+    schema-detection and event-reconstruction logic.
+
+    Returns None if no command rows are present in df.
+    """
+    # Crop to command events only, before filtering.
     # post_s=15 covers the 9.9s epoch window plus a buffer.
     cmd_mask = (df['stim_type'].str.match(r'(right|left)_(keep|stop)', na=False) |
                 df['stim_type'].str.contains('command', na=False))
@@ -155,8 +175,7 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
     has_runs  = df['stim_type'].str.contains('command', na=False).any()
     SCHEMA = 'pairs' if has_pairs else 'runs' if has_runs else None
     if SCHEMA is None:
-        print(f'  [command] No command rows — skipping.')
-        return
+        return None
     print(f'  [command] Schema: {SCHEMA}')
 
     # Audio durations needed by both schemas: pairs to offset audio onset → imagery onset,
@@ -260,6 +279,229 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
     )
     print(f'  [command] cmd epochs: {len(epochs_cmd)} ({len(epochs_cmd["keep"])} keep, {len(epochs_cmd["stop"])} stop)')
 
+    # Claassen SVM sub-epochs
+    SUB_EPOCH_DUR  = 2.0
+    N_SUB          = 5
+    sub_events_list, sub_labels, sub_groups = [], [], []
+    n_pairs = min(len(keep_events), len(stop_events))
+    if len(keep_events) != len(stop_events):
+        print(f'  [command] WARNING: keep/stop count mismatch '
+              f'({len(keep_events)} keep vs {len(stop_events)} stop) — using {n_pairs} pairs')
+
+    for pair_idx in range(n_pairs):
+        k_sample = keep_events[pair_idx, 0]
+        s_sample = stop_events[pair_idx, 0]
+        for sub in range(N_SUB):
+            offset = int(sub * SUB_EPOCH_DUR * sfreq)
+            sub_events_list.append([k_sample + offset, 0, 1])
+            sub_labels.append(1)
+            sub_groups.append(pair_idx)
+            sub_events_list.append([s_sample + offset, 0, 2])
+            sub_labels.append(0)
+            sub_groups.append(pair_idx)
+
+    sub_events_arr = np.array(sub_events_list, dtype=int)
+    sub_labels     = np.array(sub_labels)
+    sub_groups     = np.array(sub_groups)
+
+    sub_epochs = mne.Epochs(
+        raw_erd, events=sub_events_arr,
+        event_id={'keep': 1, 'stop': 2},
+        tmin=0, tmax=SUB_EPOCH_DUR - 1 / sfreq,
+        baseline=None, preload=True, verbose=False,
+    ).pick(available_eeg)
+
+    if len(sub_epochs) != len(sub_events_arr):
+        n_oob = len(sub_events_arr) - len(sub_epochs)
+        print(f'  [command] WARNING: {n_oob} sub-epochs out of bounds — '
+              f'realigning sub_labels/sub_groups to selection')
+        sub_labels = sub_labels[sub_epochs.selection]
+        sub_groups = sub_groups[sub_epochs.selection]
+
+    SVM_BANDS       = [(1, 3), (4, 7), (8, 13), (14, 30)]
+    SVM_BAND_LABELS = ['delta', 'theta', 'alpha', 'beta']
+
+    data_sub        = sub_epochs.get_data()
+    n_sub_ep, n_ch_svm, _ = data_sub.shape
+    psds_sub, psd_freqs_svm = psd_array_multitaper(
+        data_sub, sfreq=sfreq, fmin=1, fmax=30, verbose=False
+    )
+
+    X_svm = np.zeros((n_sub_ep, n_ch_svm * len(SVM_BANDS)))
+    for bi, (flo, fhi) in enumerate(SVM_BANDS):
+        freq_idx = np.where((psd_freqs_svm >= flo) & (psd_freqs_svm <= fhi))[0]
+        X_svm[:, bi * n_ch_svm:(bi + 1) * n_ch_svm] = psds_sub[:, :, freq_idx].mean(axis=2)
+
+    # Band power is approximately log-normal; log-transform compresses multiplicative
+    # outliers (e.g. a transient electrode artifact 1000x normal power becomes a +3
+    # log-unit outlier instead of a +1000 raw-unit one) before RobustScaler — see
+    # CLAUDE.md "Log-transform PSD features before scaling" (2026-06-10).
+    X_svm = np.log10(X_svm)
+
+    return CommandSubEpochs(
+        raw_erd=raw_erd, SCHEMA=SCHEMA,
+        keep_events=keep_events, stop_events=stop_events,
+        keep_meta_df=keep_meta_df, stop_meta_df=stop_meta_df,
+        MOTOR_CHANNELS=MOTOR_CHANNELS, epochs_cmd=epochs_cmd,
+        sub_epochs=sub_epochs, data_sub=data_sub,
+        sub_labels=sub_labels, sub_groups=sub_groups,
+        X_svm=X_svm, psds_sub=psds_sub, psd_freqs_svm=psd_freqs_svm,
+        SVM_BANDS=SVM_BANDS, SVM_BAND_LABELS=SVM_BAND_LABELS,
+    )
+
+
+def plot_svm_patterns(X_svm, sub_labels, sub_epochs, SVM_BANDS, SVM_BAND_LABELS,
+                       subject_id: str, out_dir: Path) -> None:
+    """Haufe et al. (2014) spatial patterns for the keep-vs-stop SVM, one topomap
+    per frequency band.
+
+    inverse_transform=False: get_coef's inverse_transform applies
+    RobustScaler.inverse_transform (x * scale_ + center_) to the pattern vector,
+    but center_ is an additive per-feature offset (~the median log10 band power,
+    ~-9 to -7) that swamps the much smaller (~0.03-0.3) pattern values themselves
+    -- every band/channel ends up dominated by center_ and comes out uniformly
+    negative, rendering as all-blue topomaps regardless of the true pattern.
+    Patterns in scaled-feature space are sign/relative-magnitude correct, which is
+    all the per-band percentile-scaled topomap needs.
+
+    n_ch_svm * len(SVM_BANDS) features are laid out band-major in X_svm (band 0's
+    channels, then band 1's, ...), so the flat pattern vector must be reshaped as
+    (len(SVM_BANDS), n_ch_svm) and transposed -- reshaping directly to
+    (n_ch_svm, len(SVM_BANDS)) interleaves channels and bands.
+    """
+    n_ch_svm = len(sub_epochs.ch_names)
+    clf_patterns = make_pipeline(
+        RobustScaler(), LinearModel(LinearSVC(max_iter=10000, dual='auto'))
+    )
+    clf_patterns.fit(X_svm, sub_labels)
+    patterns         = get_coef(clf_patterns, 'patterns_', inverse_transform=False)
+    spatial_patterns = patterns.reshape(len(SVM_BANDS), n_ch_svm).T
+
+    montage_svm = mne.channels.make_standard_montage('standard_1020')
+    sub_epochs.set_montage(montage_svm, match_case=False, on_missing='warn')
+    fig, axes = plt.subplots(1, len(SVM_BANDS), figsize=(12, 3))
+    for ax, (flo, fhi), lbl, sp_band in zip(axes, SVM_BANDS, SVM_BAND_LABELS, spatial_patterns.T):
+        scale = np.percentile(np.abs(sp_band), 99) or 1.0
+        im, _ = mne.viz.plot_topomap(sp_band, sub_epochs.info,
+                                      vlim=(-scale, scale), cmap='RdBu_r', axes=ax, show=False)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_title(f'{lbl}\n{flo}–{fhi} Hz')
+    fig.suptitle(f'{subject_id}: SVM Spatial Patterns (Keep vs Stop)', fontsize=11)
+    plt.tight_layout()
+    fig.savefig(out_dir / f'{subject_id}_command_svm_patterns.png', dpi=150)
+    plt.close(fig)
+
+
+def _plot_decoding(subject_id: str, out_dir: Path, sub_groups, sub_labels, prob_keep,
+                    auc: float, p_val: float, classifier_label: str, suffix: str) -> None:
+    """Decoding prediction per trial — Claassen 2019 Figure 3 style.
+
+    Averages the 5 sub-epochs within each keep or stop period so each trial
+    contributes one keep value and one stop value. Plots as scatter + smoothed
+    trend with a box-plot summary panel showing the overall separation.
+    """
+    from scipy.ndimage import uniform_filter1d as _uf1d
+    _pk_map: dict = {}; _ps_map: dict = {}
+    for _i, (_pi, _lbl) in enumerate(zip(sub_groups, sub_labels)):
+        (_pk_map if _lbl == 1 else _ps_map).setdefault(_pi, []).append(prob_keep[_i])
+    _pairs_both = sorted(set(_pk_map) & set(_ps_map))
+    _pk = np.array([np.mean(_pk_map[_p]) for _p in _pairs_both])
+    _ps = np.array([np.mean(_ps_map[_p])  for _p in _pairs_both])
+    _xp = np.arange(1, len(_pairs_both) + 1)
+
+    # Zoom the y-axis to where the predictions (plus the chance line) actually
+    # fall — with a weak classifier the values cluster tightly around 0.5 and
+    # a fixed 0-1 axis makes that separation invisible.
+    _all_probs = np.concatenate([_pk, _ps, [0.5]])
+    _pad = max(0.03, 0.1 * float(np.ptp(_all_probs)))
+    _ylo = max(0.0, float(_all_probs.min()) - _pad)
+    _yhi = min(1.0, float(_all_probs.max()) + _pad)
+
+    fig_dec, (ax_sc, ax_bx) = plt.subplots(
+        1, 2, figsize=(14, 4.5), gridspec_kw={'width_ratios': [3, 1]},
+    )
+
+    # Scatter panel — one dot per trial per condition
+    ax_sc.axhline(0.5, color='k', ls='--', lw=0.8, zorder=1, label='Chance (0.5)')
+    ax_sc.scatter(_xp, _pk, color='#f5a623', s=18, alpha=0.65, zorder=3, label='Keep (move)')
+    ax_sc.scatter(_xp, _ps, color='#4a90d9', s=18, alpha=0.65, zorder=3, label='Stop (rest)')
+    _sm = max(5, len(_xp) // 8)  # smoothing window ~ 1/8 of trials
+    if len(_pk) >= _sm:
+        ax_sc.plot(_xp, _uf1d(_pk, size=_sm), color='#c87800', lw=2.0, zorder=4)
+        ax_sc.plot(_xp, _uf1d(_ps, size=_sm), color='#1a5ba0', lw=2.0, zorder=4)
+    ax_sc.set_ylim(_ylo, _yhi)
+    ax_sc.set_xlim(0.5, len(_pairs_both) + 0.5)
+    ax_sc.set_xlabel('Trial (keep+stop pair)', fontsize=10)
+    ax_sc.set_ylabel('Decoding Prediction', fontsize=10)
+    ax_sc.text(0.01, 0.97, 'Move', transform=ax_sc.transAxes,
+               fontsize=9, ha='left', va='top', color='#555')
+    ax_sc.text(0.01, 0.03, 'Rest', transform=ax_sc.transAxes,
+               fontsize=9, ha='left', va='bottom', color='#555')
+    ax_sc.legend(fontsize=9, loc='upper right')
+    ax_sc.grid(True, alpha=0.2)
+
+    # Box panel — overall keep vs stop distribution
+    _bplt = ax_bx.boxplot(
+        [_pk, _ps], tick_labels=['Keep\n(move)', 'Stop\n(rest)'],
+        patch_artist=True, widths=0.5,
+        medianprops=dict(color='k', lw=2),
+        whiskerprops=dict(lw=1.2), capprops=dict(lw=1.2),
+        showfliers=False,
+    )
+    _bplt['boxes'][0].set_facecolor('#f5a623'); _bplt['boxes'][0].set_alpha(0.7)
+    _bplt['boxes'][1].set_facecolor('#4a90d9'); _bplt['boxes'][1].set_alpha(0.7)
+    ax_bx.axhline(0.5, color='k', ls='--', lw=0.8)
+    ax_bx.set_ylim(_ylo, _yhi)
+    ax_bx.set_ylabel('Prediction', fontsize=10)
+    ax_bx.grid(True, alpha=0.25, axis='y')
+
+    fig_dec.suptitle(
+        f'{subject_id}: {classifier_label} — Keep vs Stop  '
+        f'AUC={auc:.3f}  p={p_val:.3f}',
+        fontsize=11,
+    )
+    plt.tight_layout()
+    fig_dec.savefig(out_dir / f'{subject_id}{suffix}', dpi=150)
+    plt.close(fig_dec)
+
+
+def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
+                df: pd.DataFrame, out_dir: Path, *, force: bool = False):
+    bg = _screen_background_eeg(raw, sfreq, available_eeg)
+    if bg['flags']:
+        for flag in bg['flags']:
+            print(f'  [command] BACKGROUND WARNING: {flag}')
+        print(f'  [command] Pathological background predicts zero CMD yield '
+              f'(Claassen 2025 medRxiv) — proceeding but interpret with caution')
+    else:
+        asym_str = f'{100 * bg["asymmetry"]:.0f}%' if not np.isnan(bg['asymmetry']) else 'n/a'
+        print(f'  [command] Background screen: pass  '
+              f'(suppression={100 * bg["suppression_frac"]:.0f}%  '
+              f'BS-CV={bg["bs_score"]:.2f}  asym={asym_str})')
+
+    built = build_command_subepochs(raw, sfreq, available_eeg, df)
+    if built is None:
+        print(f'  [command] No command rows — skipping.')
+        return
+
+    raw_erd         = built.raw_erd
+    SCHEMA          = built.SCHEMA
+    keep_events     = built.keep_events
+    stop_events     = built.stop_events
+    keep_meta_df    = built.keep_meta_df
+    stop_meta_df    = built.stop_meta_df
+    MOTOR_CHANNELS  = built.MOTOR_CHANNELS
+    epochs_cmd      = built.epochs_cmd
+    sub_epochs      = built.sub_epochs
+    data_sub        = built.data_sub
+    sub_labels      = built.sub_labels
+    sub_groups      = built.sub_groups
+    X_svm           = built.X_svm
+    psds_sub        = built.psds_sub
+    psd_freqs_svm   = built.psd_freqs_svm
+    SVM_BANDS       = built.SVM_BANDS
+    SVM_BAND_LABELS = built.SVM_BAND_LABELS
+
     # ERD PSD — overview averaged across all sides and motor channels (summary visualization)
     keep_ep = epochs_cmd['keep'].copy().pick(MOTOR_CHANNELS)
     stop_ep = epochs_cmd['stop'].copy().pick(MOTOR_CHANNELS)
@@ -314,7 +556,7 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
         beta_k_ch = band_power_per_ch(dk_s, fk, *BETA_BAND)
         beta_s_ch = band_power_per_ch(ds_s, fk, *BETA_BAND)
 
-        erd_stats[side] = {}
+        erd_stats[side] = {'contra_channel': contra_ch, 'ipsi_channel': ipsi_ch}
         for ci, ch in enumerate(ep_k_s.ch_names):
             t_mu,   p2_mu   = stats.ttest_rel(mu_k_ch[:, ci],   mu_s_ch[:, ci])
             t_beta, p2_beta = stats.ttest_rel(beta_k_ch[:, ci], beta_s_ch[:, ci])
@@ -443,61 +685,10 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
     fig.savefig(out_dir / f'{subject_id}_command_erd.png', dpi=150)
     plt.close(fig)
 
-    # Claassen SVM
-    SUB_EPOCH_DUR  = 2.0
-    N_SUB          = 5
-    sub_events_list, sub_labels, sub_groups = [], [], []
-    n_pairs = min(len(keep_events), len(stop_events))
-    if len(keep_events) != len(stop_events):
-        print(f'  [command] WARNING: keep/stop count mismatch '
-              f'({len(keep_events)} keep vs {len(stop_events)} stop) — using {n_pairs} pairs')
-
-    for pair_idx in range(n_pairs):
-        k_sample = keep_events[pair_idx, 0]
-        s_sample = stop_events[pair_idx, 0]
-        for sub in range(N_SUB):
-            offset = int(sub * SUB_EPOCH_DUR * sfreq)
-            sub_events_list.append([k_sample + offset, 0, 1])
-            sub_labels.append(1)
-            sub_groups.append(pair_idx)
-            sub_events_list.append([s_sample + offset, 0, 2])
-            sub_labels.append(0)
-            sub_groups.append(pair_idx)
-
-    sub_events_arr = np.array(sub_events_list, dtype=int)
-    sub_labels     = np.array(sub_labels)
-    sub_groups     = np.array(sub_groups)
-
-    sub_epochs = mne.Epochs(
-        raw_erd, events=sub_events_arr,
-        event_id={'keep': 1, 'stop': 2},
-        tmin=0, tmax=SUB_EPOCH_DUR - 1 / sfreq,
-        baseline=None, preload=True, verbose=False,
-    ).pick(available_eeg)
-
-    if len(sub_epochs) != len(sub_events_arr):
-        n_oob = len(sub_events_arr) - len(sub_epochs)
-        print(f'  [command] WARNING: {n_oob} sub-epochs out of bounds — '
-              f'realigning sub_labels/sub_groups to selection')
-        sub_labels = sub_labels[sub_epochs.selection]
-        sub_groups = sub_groups[sub_epochs.selection]
-
-    SVM_BANDS       = [(1, 3), (4, 7), (8, 13), (14, 30)]
-    SVM_BAND_LABELS = ['delta', 'theta', 'alpha', 'beta']
-
-    data_sub        = sub_epochs.get_data()
-    n_sub_ep, n_ch_svm, _ = data_sub.shape
-    psds_sub, psd_freqs_svm = psd_array_multitaper(
-        data_sub, sfreq=sfreq, fmin=1, fmax=30, verbose=False
-    )
-
-    X_svm = np.zeros((n_sub_ep, n_ch_svm * len(SVM_BANDS)))
-    for bi, (flo, fhi) in enumerate(SVM_BANDS):
-        freq_idx = np.where((psd_freqs_svm >= flo) & (psd_freqs_svm <= fhi))[0]
-        X_svm[:, bi * n_ch_svm:(bi + 1) * n_ch_svm] = psds_sub[:, :, freq_idx].mean(axis=2)
-
+    # Claassen SVM — feature matrix X_svm and sub-epoch arrays already built by
+    # build_command_subepochs() above.
     logo    = LeaveOneGroupOut()
-    clf_svm = make_pipeline(StandardScaler(), LinearSVC(max_iter=10000, dual='auto'))
+    clf_svm = make_pipeline(RobustScaler(), LinearSVC(max_iter=10000, dual='auto'))
 
     # LOO decision function values → AUC + per-epoch probabilities for time-course plot
     decision_vals = cross_val_predict(
@@ -520,6 +711,23 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
     perm_scores_svm = np.array(perm_scores_svm)
     p_svm = (np.sum(perm_scores_svm >= mean_auc_svm) + 1) / (N_PERMS_SVM + 1)
     print(f'  [command] SVM AUC={mean_auc_svm:.3f}  p={p_svm:.4f}')
+
+    # Logistic Regression on the same band-power features — second decoding view
+    # alongside the production LinearSVC, predict_proba gives P(keep) directly.
+    clf_lr = make_pipeline(RobustScaler(), LogisticRegression(max_iter=10000, class_weight='balanced'))
+    prob_keep_lr = cross_val_predict(
+        clf_lr, X_svm, sub_labels,
+        method='predict_proba', cv=logo, groups=sub_groups,
+    )[:, 1]
+    mean_auc_lr = roc_auc_score(sub_labels, prob_keep_lr)
+
+    rng_lr = np.random.default_rng(45)
+    perm_scores_lr = np.array([
+        roc_auc_score(rng_lr.permutation(sub_labels), prob_keep_lr)
+        for _ in range(N_PERMS_SVM)
+    ])
+    p_lr = (np.sum(perm_scores_lr >= mean_auc_lr) + 1) / (N_PERMS_SVM + 1)
+    print(f'  [command] LogReg AUC={mean_auc_lr:.3f}  p={p_lr:.4f}')
 
     # SVM null distribution plot
     fig, ax = plt.subplots(figsize=(8, 3))
@@ -583,94 +791,31 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
     fig_bp.savefig(out_dir / f'{subject_id}_command_psd_features.png', dpi=150)
     plt.close(fig_bp)
 
-    # Decoding prediction per trial — Claassen 2019 Figure 3 style.
-    # Average the 5 sub-epochs within each keep or stop period so each trial
-    # contributes one keep value and one stop value. Plot as scatter + smoothed
-    # trend with a box-plot summary panel showing the overall separation.
-    from matplotlib.patches import Patch as _Patch
-    from scipy.ndimage import uniform_filter1d as _uf1d
-    _pk_map: dict = {}; _ps_map: dict = {}
-    for _i, (_pi, _lbl) in enumerate(zip(sub_groups, sub_labels)):
-        (_pk_map if _lbl == 1 else _ps_map).setdefault(_pi, []).append(prob_keep[_i])
-    _pairs_both = sorted(set(_pk_map) & set(_ps_map))
-    _pk = np.array([np.mean(_pk_map[_p]) for _p in _pairs_both])
-    _ps = np.array([np.mean(_ps_map[_p])  for _p in _pairs_both])
-    _xp = np.arange(1, len(_pairs_both) + 1)
-
-    fig_dec, (ax_sc, ax_bx) = plt.subplots(
-        1, 2, figsize=(14, 4.5), gridspec_kw={'width_ratios': [3, 1]},
-    )
-
-    # Scatter panel — one dot per trial per condition
-    ax_sc.axhline(0.5, color='k', ls='--', lw=0.8, zorder=1, label='Chance (0.5)')
-    ax_sc.scatter(_xp, _pk, color='#f5a623', s=18, alpha=0.65, zorder=3, label='Keep (move)')
-    ax_sc.scatter(_xp, _ps, color='#4a90d9', s=18, alpha=0.65, zorder=3, label='Stop (rest)')
-    _sm = max(5, len(_xp) // 8)  # smoothing window ~ 1/8 of trials
-    if len(_pk) >= _sm:
-        ax_sc.plot(_xp, _uf1d(_pk, size=_sm), color='#c87800', lw=2.0, zorder=4)
-        ax_sc.plot(_xp, _uf1d(_ps, size=_sm), color='#1a5ba0', lw=2.0, zorder=4)
-    ax_sc.set_ylim(0, 1)
-    ax_sc.set_xlim(0.5, len(_pairs_both) + 0.5)
-    ax_sc.set_xlabel('Trial (keep+stop pair)', fontsize=10)
-    ax_sc.set_ylabel('Decoding Prediction', fontsize=10)
-    ax_sc.text(0.01, 0.97, 'Move', transform=ax_sc.transAxes,
-               fontsize=9, ha='left', va='top', color='#555')
-    ax_sc.text(0.01, 0.03, 'Rest', transform=ax_sc.transAxes,
-               fontsize=9, ha='left', va='bottom', color='#555')
-    ax_sc.legend(fontsize=9, loc='upper right')
-    ax_sc.grid(True, alpha=0.2)
-
-    # Box panel — overall keep vs stop distribution
-    _bplt = ax_bx.boxplot(
-        [_pk, _ps], tick_labels=['Keep\n(move)', 'Stop\n(rest)'],
-        patch_artist=True, widths=0.5,
-        medianprops=dict(color='k', lw=2),
-        whiskerprops=dict(lw=1.2), capprops=dict(lw=1.2),
-        showfliers=False,
-    )
-    _bplt['boxes'][0].set_facecolor('#f5a623'); _bplt['boxes'][0].set_alpha(0.7)
-    _bplt['boxes'][1].set_facecolor('#4a90d9'); _bplt['boxes'][1].set_alpha(0.7)
-    ax_bx.axhline(0.5, color='k', ls='--', lw=0.8)
-    ax_bx.set_ylim(0, 1)
-    ax_bx.set_ylabel('Prediction', fontsize=10)
-    ax_bx.grid(True, alpha=0.25, axis='y')
-
-    fig_dec.suptitle(
-        f'{subject_id}: SVM Decoding — Keep vs Stop  '
-        f'AUC={mean_auc_svm:.3f}  p={p_svm:.3f}',
-        fontsize=11,
-    )
-    plt.tight_layout()
-    fig_dec.savefig(out_dir / f'{subject_id}_command_decoding.png', dpi=150)
-    plt.close(fig_dec)
+    # Decoding prediction per trial — Claassen 2019 Figure 3 style. Plotted once
+    # per classifier (Linear SVM and Logistic Regression, both on band-power
+    # features) via _plot_decoding below.
+    _plot_decoding(subject_id, out_dir, sub_groups, sub_labels, prob_keep,
+                    mean_auc_svm, p_svm, 'Linear SVM Decoding (Band Power Features)',
+                    '_command_decoding.png')
+    _plot_decoding(subject_id, out_dir, sub_groups, sub_labels, prob_keep_lr,
+                    mean_auc_lr, p_lr, 'Logistic Regression Decoding (Band Power Features)',
+                    '_command_decoding_lr.png')
 
     # SVM spatial patterns
-    clf_patterns = make_pipeline(
-        StandardScaler(), LinearModel(LinearSVC(max_iter=10000, dual='auto'))
-    )
-    clf_patterns.fit(X_svm, sub_labels)
-    patterns         = get_coef(clf_patterns, 'patterns_', inverse_transform=True)
-    spatial_patterns = patterns.reshape(n_ch_svm, len(SVM_BANDS))
-
-    montage_svm = mne.channels.make_standard_montage('standard_1020')
-    sub_epochs.set_montage(montage_svm, match_case=False, on_missing='warn')
-    fig, axes = plt.subplots(1, len(SVM_BANDS), figsize=(12, 3))
-    for ax, (flo, fhi), lbl, sp_band in zip(axes, SVM_BANDS, SVM_BAND_LABELS, spatial_patterns.T):
-        scale = np.percentile(np.abs(sp_band), 99) or 1.0
-        im, _ = mne.viz.plot_topomap(sp_band, sub_epochs.info,
-                                      vlim=(-scale, scale), cmap='RdBu_r', axes=ax, show=False)
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        ax.set_title(f'{lbl}\n{flo}–{fhi} Hz')
-    fig.suptitle(f'{subject_id}: SVM Spatial Patterns (Keep vs Stop)', fontsize=11)
-    plt.tight_layout()
-    fig.savefig(out_dir / f'{subject_id}_command_svm_patterns.png', dpi=150)
-    plt.close(fig)
+    plot_svm_patterns(X_svm, sub_labels, sub_epochs, SVM_BANDS, SVM_BAND_LABELS,
+                      subject_id, out_dir)
 
     # Riemannian MDM classifier — operates on covariance matrices (SPD manifold).
     # Consistently outperforms LinearSVC on PSD features on benchmark motor imagery datasets.
+    riemannian_result = None
     if HAS_PYRIEMANN:
         print('  [command] Running Riemannian MDM classifier...')
-        cov_sub   = Covariances(estimator='lwf').fit_transform(data_sub)
+        # Clip to +/-200 uV (matches the oddball fallback artifact threshold) before
+        # covariance estimation — an unclipped electrode-pop transient inflates that
+        # channel's variance by orders of magnitude and dominates the SPD covariance
+        # matrix. See CLAUDE.md "Clip raw amplitude before MDM covariance" (2026-06-10).
+        CLIP_V  = 200e-6
+        cov_sub = Covariances(estimator='lwf').fit_transform(np.clip(data_sub, -CLIP_V, CLIP_V))
         riem_prob = cross_val_predict(
             MDM(metric='riemann'), cov_sub, sub_labels,
             cv=logo, groups=sub_groups, method='predict_proba',
@@ -685,6 +830,7 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
         p_riem    = (np.sum(perm_riem >= mean_auc_riem) + 1) / (N_PERMS_SVM + 1)
         print(f'  [command] Riemannian MDM AUC={mean_auc_riem:.3f}  p={p_riem:.4f}  '
               f'(SVM: {mean_auc_svm:.3f}  p={p_svm:.4f})')
+        riemannian_result = {'auc': float(mean_auc_riem), 'p_value': float(p_riem)}
 
         fig_riem, ax_riem = plt.subplots(figsize=(8, 3))
         ax_riem.hist(perm_riem, bins=30, color='steelblue', alpha=0.7, label='Permutation AUC')
@@ -702,8 +848,27 @@ def run_command(subject_id: str, raw, sfreq: float, available_eeg: list,
         print('  [command] pyriemann not installed — skipping Riemannian MDM '
               '(pip install pyriemann)')
 
-    # Write results sentinel
+    # Write results sentinel + summary stats (consumed by generate_reports.py for the
+    # patient-divider "Bottom Line" synthesis paragraph).
+    asym = bg['asymmetry']
+    results_summary = {
+        'completed':          True,
+        'schema':             SCHEMA,
+        'n_keep_epochs':      len(epochs_cmd['keep']),
+        'n_stop_epochs':      len(epochs_cmd['stop']),
+        'background_screen': {
+            'pass':             bg['pass'],
+            'suppression_frac': float(bg['suppression_frac']),
+            'bs_score':         float(bg['bs_score']),
+            'asymmetry':        None if np.isnan(asym) else float(asym),
+            'flags':            bg['flags'],
+        },
+        'erd':                erd_stats,
+        'svm_result':         {'auc': float(mean_auc_svm), 'p_value': float(p_svm)},
+        'lr_result':          {'auc': float(mean_auc_lr), 'p_value': float(p_lr)},
+        'riemannian_result':  riemannian_result,
+    }
     with open(out_dir / 'results.json', 'w') as _f:
-        json.dump({'completed': True}, _f, indent=2)
+        json.dump(results_summary, _f, indent=2)
 
     print(f'  [command] Saved figures to {out_dir}')

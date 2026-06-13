@@ -197,10 +197,16 @@ def _crop_to_paradigm(raw, df: pd.DataFrame, stim_mask,
 
     pre_s / post_s should be >= the widest epoch window used for that analysis
     (e.g. Johnsen uses -2 to +2 s, so pre_s=5 is safe for oddball).
+
+    Uses both edf_start and edf_end of matching rows for the upper bound — for
+    most stim types these are nearly identical, but for command "runs" schema
+    rows edf_end marks the end of the full 8-cycle run (~200s after edf_start),
+    which post_s alone does not cover.
     """
     seg = df[stim_mask]
     if seg.empty:
         return raw
     t0 = max(0.0, float(seg['edf_start'].min()) - pre_s)
-    t1 = min(float(raw.times[-1]), float(seg['edf_start'].max()) + post_s)
+    t1 = min(float(raw.times[-1]),
+             max(float(seg['edf_start'].max()), float(seg['edf_end'].max())) + post_s)
     return raw.copy().crop(tmin=t0, tmax=t1)
