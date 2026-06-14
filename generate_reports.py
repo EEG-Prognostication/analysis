@@ -999,57 +999,254 @@ ANALYSES = {
         ],
     },
 
-    'pooled_oddball': {
-        'pdf_name':   'report_pooled_oddball.pdf',
-        'title':      'Cross-Patient Pooled Oddball Analysis',
-        'full_title': 'Cross-Patient Pooled Oddball Analysis (Cohort-Level P300)',
+    'pooled': {
+        'pdf_name':   'report_pooled_analysis.pdf',
+        'title':      'Pooled Cross-Patient Analyses',
+        'full_title': 'Pooled Cross-Patient Analyses (Cross-Patient Generalization)',
         'overview': (
-            'Background: Per-patient analyses test whether each individual showed a P300 '
-            'response. This pooled analysis asks a different question: does the population-level '
-            'P300 signature generalise across patients? Leave-one-patient-out (LOPO) cross-'
-            'validation trains a XDAWN+MDM classifier on all patients except one, then tests '
-            'on the held-out patient. This evaluates cross-patient transfer — the foundation '
-            'of building a clinical tool that works on new, unseen patients.\n\n'
-            'The normative summary shows where each patient falls on key biomarkers relative '
-            'to the cohort: P3b amplitude, Fischer hierarchy score, and rare tone count. '
-            'Patients with fewer than 10 rare tones are flagged in red — their results should '
-            'be interpreted with caution regardless of the statistical outcome.'
+            'Every other report in this collection evaluates one patient on one session. '
+            'This report asks a different question: if a classifier is trained on other '
+            'patients\' data, does it work on someone it has never seen?\n\n'
+            'Leave-one-patient-out (LOPO) cross-validation tests this directly: train on '
+            'all analysable patients but one, test on the one left out, and repeat so '
+            'each patient is held out exactly once. Performance well above chance is the '
+            'bar a tool must clear before it could be used on a new patient without '
+            'per-patient calibration.\n\n'
+            'Two paradigms are pooled across five patients (CON010, CON012, CON013, '
+            'CON014, CON015):\n\n'
+            'Oddball P300 uses an XDAWN+MDM Riemannian-geometry classifier on '
+            'single-trial epochs (rare vs standard tone). Command following compares '
+            'eight feature-extraction/classifier combinations (keep vs stop, motor '
+            'imagery), including three EEGNet variants -- compact convolutional '
+            'neural networks trained directly on raw multi-channel EEG.\n\n'
+            'Both sections are exploratory cross-patient checks and do not change the '
+            'per-patient results reported elsewhere.'
         ),
-        'figures': [
+        'glossary': [
+            ('Leave-one-patient-out (LOPO) cross-validation',
+             'A classifier is trained on data from all analysable patients except one, '
+             'then tested on the held-out patient\'s data. Repeating this once per '
+             'patient, so each patient is held out exactly once, measures how well a '
+             'result generalises to a new, unseen patient -- a stricter test than '
+             'evaluating within one patient\'s own data.'),
+            ('AUC (Area Under the Curve)',
+             'A classification-accuracy score ranging from 0.5 (chance, no better than '
+             'a coin flip) to 1.0 (perfect separation). Every AUC in this report comes '
+             'from held-out-patient predictions only.'),
+            ('Permutation p-value',
+             'The true labels are randomly shuffled many times and the AUC recomputed '
+             'each time, building a distribution of AUCs expected by chance. The '
+             'p-value is the fraction of shuffles that scored as high as, or higher '
+             'than, the real result -- a small p-value (conventionally below 0.05) '
+             'means the real result is unlikely to be due to chance.'),
+            ('95% confidence interval (CI)',
+             'A range obtained by resampling the held-out trial-pairs with replacement '
+             'many times and recomputing the AUC each time; the interval covers the '
+             'middle 95% of those values. A narrow interval well above 0.5 indicates a '
+             'consistently strong result; an interval spanning 0.5 indicates the '
+             'result could plausibly be chance for some held-out patients.'),
+            ('XDAWN + MDM (Riemannian geometry classifier)',
+             'XDAWN is a spatial filter designed to enhance evoked responses such as '
+             'the P300; MDM (Minimum Distance to Riemannian Mean) then classifies each '
+             'trial\'s filtered covariance matrix by its distance to the average '
+             '"rare" vs "standard" covariance pattern, computed on the curved space '
+             'of covariance matrices rather than treating them as flat vectors.'),
+            ('EEGNet',
+             'A compact convolutional neural network purpose-built for EEG, trained '
+             'directly on raw multi-channel time series with no hand-engineered '
+             'features. It first learns temporal filters (frequency-selective '
+             'patterns over time), then spatial filters (electrode-weighting '
+             'combinations applied to each temporal filter\'s output), then combines '
+             'them to produce a single keep-vs-stop prediction per 2-second window.'),
+            ('Learned spatial filter',
+             'One of EEGNet\'s electrode-weighting combinations, visualised as a '
+             'scalp topomap. A focal pattern concentrated over one or two electrodes '
+             'suggests the network converged on an anatomically interpretable signal '
+             '(e.g. a motor-cortex dipole); a diffuse, broadly-distributed pattern '
+             'suggests a weaker or less anatomically specific signal.'),
+            ('EEGNet (Small) - Regularized and EEGNet - Oddball-Pretrained',
+             'Two additional configurations test whether the standard EEGNet\'s '
+             'cross-patient gap reflects overfitting or too little training data. '
+             '"EEGNet (Small) - Regularized" halves the number of learned filters '
+             'and increases the weight-decay penalty tenfold. "EEGNet - '
+             'Oddball-Pretrained" first trains the temporal and spatial filters on '
+             'each fold\'s training patients\' oddball P300 epochs -- a '
+             'substantially larger pool of trials -- before fine-tuning on '
+             'command-following data, a cross-paradigm transfer-learning approach.'),
+        ],
+        'sections': [
             {
-                'suffix': 'pooled_lopo_accuracy.png',
-                'title':  'Leave-One-Patient-Out Classification Accuracy',
-                'description': (
-                    'Bar chart showing XDAWN+MDM classification accuracy for each patient '
-                    'when the classifier was trained on all other patients and tested on that '
-                    'patient. Red bars indicate accuracy above 0.6 (above-chance). The dashed '
-                    'line at 0.5 is chance level. Above-chance LOPO accuracy on a held-out '
-                    'patient means the population P300 signature transfers to that individual, '
-                    'which is the prerequisite for a generalisable clinical tool. The overall '
-                    'accuracy and permutation p-value appear in the title.'
+                'dir': 'oddball',
+                'section_title': 'Oddball P300: Cross-Patient Generalization',
+                'header_label': 'Pooled: Oddball P300',
+                'overview': (
+                    'The normative summary below shows where each patient falls on key '
+                    'oddball biomarkers relative to the cohort: P3b amplitude, Fischer '
+                    'hierarchy score, and rare tone count. Patients with fewer than 10 '
+                    'rare tones are flagged in red -- their results should be '
+                    'interpreted with caution regardless of the statistical outcome.'
                 ),
-                'citations': [
-                    'Barachant, A. et al. (2013). Classification of covariance matrices using '
-                    'a Riemannian-based kernel for BCI applications. Neurocomputing, 112, 172-178.',
+                'figures': [
+                    {
+                        'suffix': 'pooled_lopo_accuracy.png',
+                        'title':  'Leave-One-Patient-Out Classification Accuracy',
+                        'description': (
+                            'Bar chart showing XDAWN+MDM classification accuracy for each '
+                            'patient when the classifier was trained on all other patients '
+                            'and tested on that patient. Red bars indicate accuracy above '
+                            '0.6 (above-chance). The dashed line at 0.5 is chance level. '
+                            'Above-chance LOPO accuracy on a held-out patient means the '
+                            'population P300 signature transfers to that individual, which '
+                            'is the prerequisite for a generalisable clinical tool. The '
+                            'overall accuracy and permutation p-value appear in the title.'
+                        ),
+                        'citations': [
+                            'Barachant, A. et al. (2013). Classification of covariance '
+                            'matrices using a Riemannian-based kernel for BCI applications. '
+                            'Neurocomputing, 112, 172-178.',
+                        ],
+                    },
+                    {
+                        'suffix': 'pooled_normative_summary.png',
+                        'title':  'Cohort Normative Summary',
+                        'description': (
+                            'Left: P3b amplitude at Pz for each patient. The red dashed '
+                            'line is the Shao 2025 clinical threshold (1.095 uV). Centre: '
+                            'Fischer hierarchy score (0-4 components significant); red '
+                            'dashed line at score 3. Right: number of rare tones kept after '
+                            'autoreject; patients in red had fewer than 10 rare tones, below '
+                            'the reliable averaging floor. This panel contextualises '
+                            'individual patient results within the cohort and flags sessions '
+                            'where data quality limits interpretation.'
+                        ),
+                        'citations': [
+                            'Fischer, C. et al. (2016). Long-term prognosis in unresponsive '
+                            'wakefulness syndrome. NeuroImage Clinical, 12, 462-468.',
+                            'Shao, R. et al. (2025). Mismatch negativity and P300 in '
+                            'diagnosis and prognostic assessment of disorders of '
+                            'consciousness. Neurocritical Care.',
+                        ],
+                    },
                 ],
             },
             {
-                'suffix': 'pooled_normative_summary.png',
-                'title':  'Cohort Normative Summary: P3b, Fischer Score, Rare Tone Count',
-                'description': (
-                    'Left: P3b amplitude at Pz for each patient. The red dashed line is the '
-                    'Shao 2025 clinical threshold (1.095 µV). Centre: Fischer hierarchy score '
-                    '(0-4 components significant); red dashed line at score 3. Right: number '
-                    'of rare tones kept after autoreject; patients in red had fewer than 10 '
-                    'rare tones, below the reliable averaging floor. This panel contextualises '
-                    'individual patient results within the cohort and flags sessions where '
-                    'data quality limits interpretation.'
+                'dir': 'command',
+                'section_title': 'Command Following: Cross-Patient Generalization (LOPO)',
+                'header_label': 'Pooled: Command Following',
+                'overview': (
+                    'Eight feature-extraction/classifier combinations were evaluated under '
+                    '5-fold LOPO, pooling all 480 two-second keep/stop sub-epochs per '
+                    'patient (48 trial-pairs x 10 sub-epochs): the production band-power '
+                    'features with Shrinkage LDA ("Band Power - LDA"), Riemannian '
+                    'tangent-space features with a linear SVM ("Tangent Space - SVM"), '
+                    'Mu/Beta Ratio features with both a linear SVM and Shrinkage LDA, '
+                    'C3-C4 Laterality features with a linear SVM, and three EEGNet '
+                    'variants -- compact CNNs trained directly on the raw 19-channel time '
+                    'series. "EEGNet (CNN)" is the standard architecture (Lawhern et al. '
+                    '2018); "EEGNet (Small) - Regularized" halves the number of learned '
+                    'filters and increases weight decay tenfold, testing whether the '
+                    'standard network\'s gap relative to the hand-engineered features '
+                    'reflects overfitting; "EEGNet - Oddball-Pretrained" first trains the '
+                    'network\'s temporal and spatial filters on each fold\'s training '
+                    'patients\' oddball P300 epochs -- a much larger pool of trials -- '
+                    'before fine-tuning on command-following data, testing whether '
+                    'cross-paradigm transfer learning helps. For all three EEGNet '
+                    'variants, a fourth, rotating patient served as an early-stopping '
+                    'validation set so every patient validated the model exactly once.\n\n'
+                    'Across the 240 pooled held-out predictions (5 patients x 48 '
+                    'trial-pairs), Band Power - LDA (AUC 0.614), Tangent Space - SVM '
+                    '(0.604), and the Mu/Beta Ratio features (0.573 with either '
+                    'classifier) all generalised significantly above chance (p = 0.005). '
+                    'All three EEGNet variants also reached significance (p <= 0.020), '
+                    'and both the smaller, regularised network (0.544, p = 0.005) and the '
+                    'oddball-pretrained network (0.530, p = 0.010) outperformed the '
+                    'standard EEGNet (0.523, p = 0.020) -- the regularised network was '
+                    'individually significant for four of the five held-out patients '
+                    '(vs. two for the standard network), suggesting some of the standard '
+                    'network\'s cross-patient gap reflects overfitting on ~1,440 training '
+                    'sub-epochs. C3-C4 Laterality (0.506) did not generalise (p = 0.31). '
+                    'Every LOPO AUC remains lower than the corresponding within-patient '
+                    'result reported in the Feature & Classifier Comparison section of '
+                    'the command-following report -- cross-patient transfer recovers '
+                    'some, but not all, of each patient\'s decodable signal.'
                 ),
-                'citations': [
-                    'Fischer, C. et al. (2016). Long-term prognosis in unresponsive wakefulness '
-                    'syndrome. NeuroImage Clinical, 12, 462-468.',
-                    'Shao, R. et al. (2025). Mismatch negativity and P300 in diagnosis and '
-                    'prognostic assessment of disorders of consciousness. Neurocritical Care.',
+                'figures': [
+                    {
+                        'suffix': 'lopo_heatmap.png',
+                        'title':  'AUC by Method and Held-Out Patient',
+                        'description': (
+                            'Each cell shows the AUC obtained when a classifier was trained '
+                            'on the other four patients and tested on the patient named in '
+                            'that column -- the leave-one-patient-out scheme described in '
+                            'the section overview, broken out per patient (the "ALL" column '
+                            'pools all five). Colour scales from red (near or below chance, '
+                            'AUC <= 0.5) to green (strong separation); an asterisk marks a '
+                            'permutation p-value below 0.05. A method that is consistently '
+                            'green across patients generalises reliably; a method that is '
+                            'green for some patients and red for others is picking up a '
+                            'patient-specific pattern rather than a shared cross-patient '
+                            'signature.'
+                        ),
+                        'citations': [
+                            'Lawhern, V. J. et al. (2018). EEGNet: a compact convolutional '
+                            'neural network for EEG-based brain-computer interfaces. '
+                            'Journal of Neural Engineering, 15(5), 056013.',
+                            'Barachant, A. et al. (2012). Multiclass brain-computer '
+                            'interface classification by Riemannian geometry. IEEE '
+                            'Transactions on Biomedical Engineering, 59(4), 920-928.',
+                            'Claassen, J. et al. (2019). Detection of brain activation in '
+                            'unresponsive patients with acute brain injury. New England '
+                            'Journal of Medicine, 380(26), 2497-2505.',
+                        ],
+                    },
+                    {
+                        'suffix': 'lopo_summary_bars.png',
+                        'title':  'Cross-Patient Summary (All Patients Pooled)',
+                        'description': (
+                            'Each bar pools the held-out predictions from all five '
+                            'patients (240 trial-pairs total) into a single AUC per '
+                            'method, with a 95% bootstrap confidence interval and a '
+                            'permutation p-value. This is the single best summary of '
+                            'whether a method\'s cross-patient performance is, overall, '
+                            'distinguishable from chance (the dashed line at 0.5).'
+                        ),
+                        'citations': [
+                            'Lawhern, V. J. et al. (2018). EEGNet: a compact convolutional '
+                            'neural network for EEG-based brain-computer interfaces. '
+                            'Journal of Neural Engineering, 15(5), 056013.',
+                            'Barachant, A. et al. (2012). Multiclass brain-computer '
+                            'interface classification by Riemannian geometry. IEEE '
+                            'Transactions on Biomedical Engineering, 59(4), 920-928.',
+                            'Claassen, J. et al. (2019). Detection of brain activation in '
+                            'unresponsive patients with acute brain injury. New England '
+                            'Journal of Medicine, 380(26), 2497-2505.',
+                        ],
+                    },
+                    {
+                        'suffix': 'eegnet_spatial_filters.png',
+                        'title':  'EEGNet Learned Spatial Filters',
+                        'description': (
+                            'EEGNet learns 16 electrode-weighting patterns (2 spatial '
+                            'filters for each of 8 temporal/frequency filters), shown '
+                            'here as scalp topomaps for the standard-architecture EEGNet '
+                            'trained on all five patients pooled (not any of the LOPO '
+                            'models above -- this is purely to visualise what the network '
+                            'learned). A focal pattern over the motor cortex (C3/C4) '
+                            'would indicate the network converged on the same '
+                            'contralateral motor-imagery signature the production ERD '
+                            'analysis targets. Instead, the 16 patterns show diffuse '
+                            'anterior-posterior or left-right gradients without a focal '
+                            'motor-cortex dipole -- consistent with this network\'s '
+                            'weaker and less patient-consistent LOPO AUC (0.523) relative '
+                            'to the hand-engineered features and the smaller, regularised '
+                            'EEGNet variant (0.544) above.'
+                        ),
+                        'citations': [
+                            'Lawhern, V. J. et al. (2018). EEGNet: a compact convolutional '
+                            'neural network for EEG-based brain-computer interfaces. '
+                            'Journal of Neural Engineering, 15(5), 056013.',
+                        ],
+                    },
                 ],
             },
         ],
@@ -1422,6 +1619,18 @@ _COMPARISON_GLOSSARY = [
      'Multitaper power in the delta, theta, alpha, and beta bands at each electrode, '
      'averaged over each 2-second sub-epoch -- the same features used by the '
      'production linear SVM, here paired with both a linear SVM and a Random Forest.'),
+    ('Motor Band Power (PSD) features',
+     'The same delta/theta/alpha/beta power features as above, restricted to the '
+     'three motor electrodes (C3, Cz, C4) -- 12 features instead of 76, testing '
+     'whether the production SVM\'s signal depends on the other sixteen channels.'),
+    ('C3-C4 Laterality features',
+     'For each band, the log-power difference between the electrode contralateral '
+     'vs. ipsilateral to the commanded hand (C3-C4 for right, C4-C3 for left) -- '
+     '4 features, mirroring the per-patient lateralization indices reported earlier.'),
+    ('Mu/Beta Ratio features',
+     'At each motor electrode (C3, Cz, C4), the ratio of mu-band (8-12 Hz) to '
+     'beta-band (14-30 Hz) power -- 3 features summarizing ERD shape independent '
+     'of overall amplitude.'),
     ('Common Spatial Patterns (CSP)',
      'Learns electrode-weighting combinations ("spatial filters") that maximise the '
      'power difference between the keep and stop conditions, then uses the '
@@ -1455,10 +1664,9 @@ _COMPARISON_GLOSSARY = [
      'is the case here.'),
     ('Bootstrap 95% confidence interval',
      'The 48 trial-pairs are resampled with replacement 2,000 times and the AUC '
-     'recomputed each time; the interval covers the middle 95% of those AUC values. '
-     'Quantifies how much the AUC could plausibly vary given only 48 independent '
-     'trial-pairs, since the 480 sub-epoch predictions used to compute AUC are '
-     'correlated within each pair.'),
+     'recomputed each time; the interval covers the middle 95% of those AUC values '
+     '-- quantifying how much AUC could plausibly vary given only 48 independent '
+     'trial-pairs, since the 480 sub-epoch predictions are correlated within each pair.'),
 ]
 
 _COMPARISON_CITATIONS = [
@@ -1480,7 +1688,7 @@ _COMPARISON_HEATMAP_FIG = {
         'feature-extraction/classifier combination (rows) for one patient (columns), '
         'colour-scaled from 0.4 (red, near or below chance) to 0.85 (green, strong '
         'separation). An asterisk marks combinations with a permutation p-value '
-        'below 0.05. The same seventeen combinations and the identical 48 trial-pairs / '
+        'below 0.05. The same twenty-nine combinations and the identical 48 trial-pairs / '
         'cross-validation scheme are used for every patient, matching the '
         'per-patient comparison charts that follow -- this summary makes it '
         'possible to see whether any feature-extraction method or classifier is '
@@ -1496,16 +1704,17 @@ _COMPARISON_BARCHART_FIG = {
         'The same keep-vs-stop decoding task as the production classifiers shown '
         'earlier in each patient\'s section -- identical 48 trial-pairs, identical '
         '2-second sub-epochs, identical leave-one-group-out cross-validation -- '
-        'repeated with seventeen combinations of feature-extraction method and '
+        'repeated with twenty-nine combinations of feature-extraction method and '
         'classifier (see glossary above). "Band Power - Linear SVM" uses the same '
         'features as the production SVM; "Covariance - Riemannian MDM" is the same '
-        'classifier as the production Riemannian result. The remaining fifteen '
-        'combinations -- Band Power with Random Forest, Logistic Regression, and '
-        'Shrinkage LDA, plus CSP, Tangent Space, and Wavelet/TFR features each with '
-        'a linear SVM, a Random Forest, a Logistic Regression, and a Shrinkage LDA '
-        '-- are additional, exploratory methods. '
+        'classifier as the production Riemannian result. The remaining twenty-seven '
+        'combinations pair each of seven feature sets -- Band Power, Motor Band '
+        'Power, C3-C4 Laterality, Mu/Beta Ratio, CSP, Tangent Space, and Wavelet/TFR '
+        '-- with a linear SVM, a Random Forest, a Logistic Regression, and a '
+        'Shrinkage LDA (28 pairings, minus the Band Power - Linear SVM combination '
+        'already named above) -- are additional, exploratory methods. '
         'Error bars are 95% bootstrap confidence intervals from resampling the 48 '
-        'trial-pairs (2,000 resamples); the number above each bar is a permutation '
+        'trial-pairs (2,000 resamples); the number beside each bar is a permutation '
         'p-value from 200 label-shuffles. This is an exploratory methodology '
         'comparison and does not change the production results.'
     ),
@@ -1532,8 +1741,8 @@ def feature_comparison_section(p: FPDF, cit_to_num: dict, patients: dict) -> Non
     y += _wrap_txt(p, MARGIN, y, _COMPARISON_INTRO, size=10, line_spacing=1.6) + 0.10
     _rule(p, y); y += 0.16
     for term, definition in _COMPARISON_GLOSSARY:
-        y += _txt(p, MARGIN, y, term, size=10, style='B') + 0.03
-        y += _wrap_txt(p, MARGIN, y, definition, size=9, line_spacing=1.5) + 0.14
+        y += _txt(p, MARGIN, y, term, size=10, style='B') + 0.02
+        y += _wrap_txt(p, MARGIN, y, definition, size=9, line_spacing=1.35) + 0.10
 
     nums = [cit_to_num[c] for c in _fig_citations(_COMPARISON_HEATMAP_FIG) if c in cit_to_num]
     figure_page(p, heatmap_path, 'All Patients', _COMPARISON_HEATMAP_FIG, citation_nums=nums,
@@ -1829,30 +2038,49 @@ def build_report(analysis_key: str, adef: dict, date_str: str) -> None:
     print(f'  Saved: {pdf_path}')
 
 
+def pooled_section_intro(p: FPDF, section: dict) -> None:
+    """Section divider page for build_pooled_report: section title + overview text."""
+    p.add_page()
+    y = 0.55
+    y += _txt(p, MARGIN, y, section['section_title'], size=16, style='B') + 0.14
+    _rule(p, y);  y += 0.18
+    _wrap_txt(p, MARGIN, y, section['overview'], size=10, line_spacing=1.6)
+
+
 def build_pooled_report(analysis_key: str, adef: dict, date_str: str) -> None:
-    """Build a report for pooled (cross-patient) analyses with no per-patient structure."""
+    """Build the consolidated cross-patient pooled-analysis report.
+
+    Each entry in adef['sections'] points at its own results/POOLED/{dir}/
+    directory and is rendered as a section intro page followed by its figures.
+    """
     pdf_path = REPORTS_DIR / adef['pdf_name']
     if pdf_path.exists():
         pdf_path.unlink()
         print(f'  Deleted old report: {pdf_path.name}')
 
-    pooled_dir = RESULTS_DIR / 'POOLED' / analysis_key.replace('pooled_', '')
-    if not pooled_dir.is_dir():
-        print(f'  No pooled results at {pooled_dir} — skipping.')
-        return
-    pngs = {f.name: f for f in pooled_dir.glob('*.png')}
-    if not pngs:
-        print(f'  No PNG figures found in {pooled_dir} — skipping.')
+    sections = []
+    for section in adef['sections']:
+        pooled_dir = RESULTS_DIR / 'POOLED' / section['dir']
+        pngs = {f.name: f for f in pooled_dir.glob('*.png')} if pooled_dir.is_dir() else {}
+        if not pngs:
+            print(f'  No pooled results in {pooled_dir} — skipping section "{section["section_title"]}".')
+            continue
+        sections.append((section, pngs))
+
+    if not sections:
+        print(f'  No pooled results found for "{analysis_key}" — skipping.')
         return
 
+    all_figs = [fd for section, _ in sections for fd in section['figures']]
     cit_to_num: dict = {}
-    for fd in adef['figures']:
+    for fd in all_figs:
         for c in _fig_citations(fd):
             if c and c not in cit_to_num:
                 cit_to_num[c] = len(cit_to_num) + 1
 
     p = _make_pdf()
-    # Title page — no patient list for pooled
+
+    # Title page
     p.add_page()
     y = 0.55
     y += _txt(p, MARGIN, y, 'EEG Clinical Analysis Report', size=18, style='B') + 0.12
@@ -1865,21 +2093,27 @@ def build_pooled_report(analysis_key: str, adef: dict, date_str: str) -> None:
     y += _txt(p, MARGIN, y, 'Overview', size=11, style='B') + 0.14
     _wrap_txt(p, MARGIN, y, adef['overview'], size=10, line_spacing=1.6)
 
-    for fd in adef['figures']:
-        matches = [v for k, v in pngs.items() if k.endswith(fd['suffix'])]
-        if not matches:
-            continue
-        nums = [cit_to_num[c] for c in _fig_citations(fd) if c in cit_to_num]
-        figure_page(p, matches[0], 'POOLED', fd, citation_nums=nums)
+    glossary_page(p, adef)
 
-    references_page(p, adef)
+    for section, pngs in sections:
+        pooled_section_intro(p, section)
+        header_label = section.get('header_label', section['section_title'])
+        for fd in section['figures']:
+            matches = [v for k, v in pngs.items() if k.endswith(fd['suffix'])]
+            if not matches:
+                continue
+            nums = [cit_to_num[c] for c in _fig_citations(fd) if c in cit_to_num]
+            figure_page(p, matches[0], 'POOLED', fd, citation_nums=nums,
+                        header_label=header_label)
+
+    references_page(p, {'figures': []}, extra_figs=all_figs)
     p.output(str(pdf_path))
     print(f'  Saved: {pdf_path}')
 
 
 def _build_one(args):
     key, adef, date_str = args
-    if key.startswith('pooled_'):
+    if key == 'pooled':
         build_pooled_report(key, adef, date_str)
     else:
         build_report(key, adef, date_str)
@@ -1892,9 +2126,8 @@ def main() -> None:
     print(f'Results directory: {RESULTS_DIR}')
     print(f'Reports directory: {REPORTS_DIR}\n')
 
-    # 'language' is paused at the protocol level (see CLAUDE.md) and 'pooled_oddball'
-    # is not currently reviewed -- skip both report builds for now.
-    items = [(k, v) for k, v in ANALYSES.items() if k not in ('language', 'pooled_oddball')]
+    # 'language' is paused at the protocol level (see CLAUDE.md) -- skip its report for now.
+    items = [(k, v) for k, v in ANALYSES.items() if k != 'language']
     n_workers = min(len(items), 4)
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
         futures = {ex.submit(_build_one, (key, adef, date_str)): key

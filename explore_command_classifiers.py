@@ -8,10 +8,14 @@ Reuses build_command_subepochs() from lib/command.py for the exact same
 event reconstruction and 2s sub-epochs used by the production SVM/MDM.
 
 Feature sets:
-    psd  — multitaper band power, all channels (production baseline)
-    csp  — Common Spatial Patterns log-variance
-    ts   — Riemannian tangent-space vector (covariance -> Euclidean vector)
-    tfr  — Morlet wavelet power, motor channels, time-resolved
+    psd       — multitaper band power, all channels (production baseline)
+    psd_motor — multitaper band power, C3/Cz/C4 only
+    lat       — per-band contra-minus-ipsilateral log power at C3/C4
+                (side-aware: right command -> contra=C3, left -> contra=C4)
+    ratio     — per motor channel, log10(mu power) - log10(beta power)
+    csp       — Common Spatial Patterns log-variance
+    ts        — Riemannian tangent-space vector (covariance -> Euclidean vector)
+    tfr       — Morlet wavelet power, motor channels, time-resolved
 
 Classifiers: LinearSVC, LogisticRegression, and shrinkage LDA (all
 RobustScaler-scaled) and RandomForestClassifier, plus the existing
@@ -80,6 +84,9 @@ TFR_BINS       = 4                        # time bins within each 2s sub-epoch
 
 COMBOS = [
     ('psd', 'svm'), ('psd', 'rf'), ('psd', 'lr'), ('psd', 'lda'),
+    ('psd_motor', 'svm'), ('psd_motor', 'rf'), ('psd_motor', 'lr'), ('psd_motor', 'lda'),
+    ('lat', 'svm'), ('lat', 'rf'), ('lat', 'lr'), ('lat', 'lda'),
+    ('ratio', 'svm'), ('ratio', 'rf'), ('ratio', 'lr'), ('ratio', 'lda'),
     ('csp', 'svm'), ('csp', 'rf'), ('csp', 'lr'), ('csp', 'lda'),
     ('ts',  'svm'), ('ts',  'rf'), ('ts',  'lr'), ('ts',  'lda'),
     ('tfr', 'svm'), ('tfr', 'rf'), ('tfr', 'lr'), ('tfr', 'lda'),
@@ -95,6 +102,18 @@ COMBO_LABEL = {
     ('psd', 'rf'):  'Band Power\nRandom Forest',
     ('psd', 'lr'):  'Band Power\nLogistic Regression',
     ('psd', 'lda'): 'Band Power\nShrinkage LDA',
+    ('psd_motor', 'svm'): 'Motor Band Power\nLinear SVM',
+    ('psd_motor', 'rf'):  'Motor Band Power\nRandom Forest',
+    ('psd_motor', 'lr'):  'Motor Band Power\nLogistic Regression',
+    ('psd_motor', 'lda'): 'Motor Band Power\nShrinkage LDA',
+    ('lat', 'svm'): 'C3-C4 Laterality\nLinear SVM',
+    ('lat', 'rf'):  'C3-C4 Laterality\nRandom Forest',
+    ('lat', 'lr'):  'C3-C4 Laterality\nLogistic Regression',
+    ('lat', 'lda'): 'C3-C4 Laterality\nShrinkage LDA',
+    ('ratio', 'svm'): 'Mu/Beta Ratio\nLinear SVM',
+    ('ratio', 'rf'):  'Mu/Beta Ratio\nRandom Forest',
+    ('ratio', 'lr'):  'Mu/Beta Ratio\nLogistic Regression',
+    ('ratio', 'lda'): 'Mu/Beta Ratio\nShrinkage LDA',
     ('csp', 'svm'): 'CSP\nLinear SVM',
     ('csp', 'rf'):  'CSP\nRandom Forest',
     ('csp', 'lr'):  'CSP\nLogistic Regression',
@@ -136,6 +155,47 @@ def _extract_tfr_features(data_sub, sfreq, ch_names, motor_channels):
         feats.append(seg[:, :, beta_idx, :].mean(axis=(2, 3)))
     X_tfr = np.concatenate(feats, axis=1)  # (n_epochs, n_motor_ch * 2 bands * TFR_BINS)
     return np.log10(X_tfr)
+
+
+def _extract_motor_psd_features(X_psd, ch_names, motor_channels, n_bands):
+    """Subset of the production log-band-power vector restricted to motor
+    channels (e.g. C3/Cz/C4) -- tests whether the other ~16 channels are
+    adding signal or just noise dimensions for the classifier."""
+    n_ch = len(ch_names)
+    motor_idx = [ch_names.index(ch) for ch in motor_channels]
+    cols = [bi * n_ch + ci for bi in range(n_bands) for ci in motor_idx]
+    return X_psd[:, cols]
+
+
+def _extract_laterality_features(X_psd, ch_names, sub_sides, n_bands):
+    """Per-band contralateral-minus-ipsilateral log power at C3/C4, signed by
+    command side (right command -> contra=C3, left command -> contra=C4).
+    Genuine ERD during 'keep' should make this more negative."""
+    n_ch = len(ch_names)
+    c3, c4 = ch_names.index('C3'), ch_names.index('C4')
+    is_right = (sub_sides == 'right')
+    contra_idx = np.where(is_right, c3, c4)
+    ipsi_idx   = np.where(is_right, c4, c3)
+    n = X_psd.shape[0]
+    rows = np.arange(n)
+    X_lat = np.stack([
+        X_psd[rows, bi * n_ch + contra_idx] - X_psd[rows, bi * n_ch + ipsi_idx]
+        for bi in range(n_bands)
+    ], axis=1)
+    return X_lat
+
+
+def _extract_mu_beta_ratio_features(X_psd, ch_names, motor_channels, SVM_BAND_LABELS):
+    """Per motor channel, log10(mu power) - log10(beta power) = log10(mu/beta) --
+    a within-channel ERD ratio that cancels broadband gain differences between
+    sub-epochs (e.g. movement artifacts that inflate all bands together)."""
+    n_ch = len(ch_names)
+    mu_idx   = SVM_BAND_LABELS.index('alpha')
+    beta_idx = SVM_BAND_LABELS.index('beta')
+    motor_idx = [ch_names.index(ch) for ch in motor_channels]
+    mu   = X_psd[:, [mu_idx   * n_ch + ci for ci in motor_idx]]
+    beta = X_psd[:, [beta_idx * n_ch + ci for ci in motor_idx]]
+    return mu - beta
 
 
 def bootstrap_auc_ci(y, scores, groups, n_boot=N_BOOT, seed=0, ci=95):
@@ -202,6 +262,14 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
     print(f'  [explore] {pid}: {n} sub-epochs, {n_groups} LOGO groups (trial-pairs)')
 
     X_tfr = _extract_tfr_features(data_sub, sfreq, ch_names, built.MOTOR_CHANNELS)
+    n_bands = len(built.SVM_BANDS)
+    X_psd_motor = _extract_motor_psd_features(X_psd, ch_names, built.MOTOR_CHANNELS, n_bands)
+    X_ratio = _extract_mu_beta_ratio_features(X_psd, ch_names, built.MOTOR_CHANNELS, built.SVM_BAND_LABELS)
+
+    has_lat = 'C3' in ch_names and 'C4' in ch_names
+    if has_lat:
+        sub_sides = built.keep_meta_df['side'].values[groups]
+        X_lat = _extract_laterality_features(X_psd, ch_names, sub_sides, n_bands)
 
     cov_sub = None
     if HAS_PYRIEMANN:
@@ -215,6 +283,10 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
 
         _fit_classifiers(oof, 'psd', X_psd[train_idx], X_psd[test_idx], test_idx, y_tr)
         _fit_classifiers(oof, 'tfr', X_tfr[train_idx], X_tfr[test_idx], test_idx, y_tr)
+        _fit_classifiers(oof, 'psd_motor', X_psd_motor[train_idx], X_psd_motor[test_idx], test_idx, y_tr)
+        _fit_classifiers(oof, 'ratio', X_ratio[train_idx], X_ratio[test_idx], test_idx, y_tr)
+        if has_lat:
+            _fit_classifiers(oof, 'lat', X_lat[train_idx], X_lat[test_idx], test_idx, y_tr)
 
         csp = CSP(n_components=CSP_COMPONENTS, reg='ledoit_wolf', log=True, norm_trace=False)
         Xtr_csp = csp.fit_transform(data_sub[train_idx], y_tr)
@@ -231,7 +303,9 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
             oof['cov_mdm'][test_idx] = mdm.predict_proba(cov_sub[test_idx])[:, 1]
 
     n_features = {
-        'psd': X_psd.shape[1], 'csp': CSP_COMPONENTS,
+        'psd': X_psd.shape[1], 'psd_motor': X_psd_motor.shape[1],
+        'lat': X_lat.shape[1] if has_lat else None, 'ratio': X_ratio.shape[1],
+        'csp': CSP_COMPONENTS,
         'ts':  cov_sub.shape[1] * (cov_sub.shape[1] + 1) // 2 if cov_sub is not None else None,
         'tfr': X_tfr.shape[1], 'cov': cov_sub.shape[1] if cov_sub is not None else None,
     }
@@ -240,6 +314,8 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
     for i, (feat, clf) in enumerate(COMBOS):
         name = f'{feat}_{clf}'
         if feat in ('ts', 'cov') and not HAS_PYRIEMANN:
+            continue
+        if feat == 'lat' and not has_lat:
             continue
         scores = oof[name]
         auc = roc_auc_score(y, scores)
@@ -261,36 +337,45 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
 
 
 def _plot_patient_comparison(pid, df_results, out_dir, n_groups):
-    fig, ax = plt.subplots(figsize=(1.1 * len(df_results) + 1, 8))
-    x = np.arange(len(df_results))
+    # Horizontal bars: with 29 combos, a vertical bar chart with rotated
+    # x-tick labels needs ~1in/bar to avoid label collisions, which at the
+    # PDF panel's ~7x4.2in box shrinks 12pt text to ~2.5pt (illegible).
+    # Horizontal bars instead grow with height (cheap in this tall panel)
+    # and an aspect ratio matched to the panel box keeps text near 7-8pt.
+    n = len(df_results)
+    fig_h = 0.21 * n
+    fig_w = 1.67 * fig_h  # ~= panel box aspect (TEXT_W / _comparison_panel_h) in generate_reports.py
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    y = np.arange(n)
     labels = [COMBO_LABEL_COMPACT[(r.feature, r.classifier)] for r in df_results.itertuples()]
     colors = [CLASSIFIER_COLOR[r.classifier] for r in df_results.itertuples()]
 
-    yerr = np.vstack([
+    xerr = np.vstack([
         df_results['auc'] - df_results['ci_lo'],
         df_results['ci_hi'] - df_results['auc'],
     ])
-    ax.bar(x, df_results['auc'], yerr=yerr, color=colors, alpha=0.8,
-           capsize=4, ecolor='black')
-    ax.axhline(0.5, color='k', ls='--', lw=1, label='Chance (0.5)')
-    for xi, r in zip(x, df_results.itertuples()):
-        ax.text(xi, r.ci_hi + 0.02, f'p={r.p_value:.3f}', ha='center', fontsize=11)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=12, rotation=45, ha='right')
-    ax.set_ylabel('LOGO-CV AUC')
-    # Zoom the y-axis to the data range (with padding) rather than the full
+    ax.barh(y, df_results['auc'], xerr=xerr, color=colors, alpha=0.8,
+            capsize=3, ecolor='black')
+    ax.axvline(0.5, color='k', ls='--', lw=1, label='Chance (0.5)')
+    # Zoom the x-axis to the data range (with padding) rather than the full
     # 0-1 scale -- AUCs cluster in ~0.4-0.85, so the full scale compressed
-    # bar-height differences to a thin band. Default (0.35, 0.95) widens
-    # further only if a CI extends beyond it.
-    ymin = max(0.0, min(0.35, float(df_results['ci_lo'].min()) - 0.03))
-    ymax = min(1.0, max(0.95, float(df_results['ci_hi'].max()) + 0.05))
-    ax.set_ylim(ymin, ymax)
+    # bar-length differences to a thin band. Default (0.35, 0.95) widens
+    # further only if a CI extends beyond it; extra right-padding for p-value text.
+    xmin = max(0.0, min(0.35, float(df_results['ci_lo'].min()) - 0.03))
+    xmax = min(1.0, max(0.95, float(df_results['ci_hi'].max()) + 0.05))
+    for yi, r in zip(y, df_results.itertuples()):
+        ax.text(r.ci_hi + 0.015, yi, f'p={r.p_value:.3f}', va='center', fontsize=9)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=11)
+    ax.invert_yaxis()
+    ax.set_xlim(xmin, xmax + 0.13)
+    ax.set_xlabel('LOGO-CV AUC')
     ax.set_title(
-        f'{pid}: Feature x Classifier comparison '
-        f'(error bars = bootstrap 95% CI over {n_groups} trial-pairs)'
+        f'{pid}: Feature x Classifier comparison (bars: 95% CI, n={n_groups} pairs)',
+        fontsize=12,
     )
-    ax.legend(fontsize=12)
-    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(fontsize=11, loc='lower right')
+    ax.grid(True, alpha=0.3, axis='x')
     plt.tight_layout()
     fig.savefig(out_dir / f'{pid}_command_feature_comparison.png', dpi=150)
     plt.close(fig)
@@ -357,7 +442,10 @@ def main():
         pid = s['patient_id']
         if pid.lower().startswith(('jo', 'test')):
             continue
-        raw, sfreq, available_eeg, df = load_session(s['edf'], s['csv'])
+        try:
+            raw, sfreq, available_eeg, df = load_session(s['edf'], s['csv'])
+        except Exception as e:
+            print(f'{pid}: ERROR loading session: {e} -- skipping'); continue
         if not has_paradigm(df, 'command'):
             continue
         out_dir = RESULTS_DIR / pid / 'command'
