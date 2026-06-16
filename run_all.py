@@ -48,7 +48,7 @@ from lib.language import run_language, STATS_SENTINEL as _LANGUAGE_SENTINEL
 from lib.command import run_command, STATS_SENTINEL as _COMMAND_SENTINEL
 from lib.spindles import run_spindles, STATS_SENTINEL as _SPINDLES_SENTINEL
 from lib.resting import run_resting, STATS_SENTINEL as _RESTING_SENTINEL
-from lib.pooled import run_pooled_oddball
+from lib.pooled import run_pooled_oddball, run_pooled_resting
 
 mne.set_log_level('WARNING')
 
@@ -59,7 +59,7 @@ RESULTS_DIR = ANALYSIS_ROOT / 'results'
 
 ALL_ANALYSES      = ['oddball', 'command']                 # run by default
 OPTIONAL_ANALYSES = ['language', 'spindles', 'resting']    # only when explicitly requested
-POOLED_ANALYSES   = ['pooled_oddball']
+POOLED_ANALYSES   = ['pooled_oddball', 'pooled_resting']
 DEFAULT_N_PERMS = 1000
 
 _SENTINELS = {
@@ -176,11 +176,12 @@ def main():
                         help='Generate oddball topographic MP4 animation (20 fps). '
                              'Skips all other analyses.')
     parser.add_argument('--pooled',  action='store_true',
-                        help='Run pooled cross-patient oddball analysis after per-patient runs.')
+                        help='Run pooled cross-patient analyses (oddball + resting microstates) '
+                             'after per-patient runs.')
     parser.add_argument('--patients', nargs='+', metavar='ID',
                         help='Limit to specific patient IDs')
     parser.add_argument('--analyses', nargs='+',
-                        choices=ALL_ANALYSES + OPTIONAL_ANALYSES + ['pooled_oddball'],
+                        choices=ALL_ANALYSES + OPTIONAL_ANALYSES + POOLED_ANALYSES,
                         metavar='NAME',
                         help=f'Analyses to run. Default: {ALL_ANALYSES}. '
                              f'Optional (not run by default): {OPTIONAL_ANALYSES}')
@@ -232,8 +233,8 @@ def main():
         print('\nDone.')
         return
 
-    # Build per-patient jobs
-    target_analyses = args.analyses or ALL_ANALYSES
+    # Build per-patient jobs (pooled analyses are handled separately below)
+    target_analyses = [a for a in (args.analyses or ALL_ANALYSES) if a not in POOLED_ANALYSES]
     jobs = []
     for session in sessions:
         pid  = session['patient_id']
@@ -288,13 +289,20 @@ def main():
             msg = _run_patient_job(job)
             print(msg)
 
-    # Pooled analysis runs after all per-patient analyses complete
+    # Pooled analyses run after all per-patient analyses complete
     if args.pooled or (args.analyses and 'pooled_oddball' in args.analyses):
         print(f'\n{"="*60}\nPooled oddball analysis\n{"="*60}')
         try:
             run_pooled_oddball(RESULTS_DIR, n_perms=n_perms)
         except Exception as e:
             import traceback; print(f'  ERROR in pooled: {e}'); traceback.print_exc()
+
+    if args.pooled or (args.analyses and 'pooled_resting' in args.analyses):
+        print(f'\n{"="*60}\nPooled resting-state microstate analysis\n{"="*60}')
+        try:
+            run_pooled_resting(RESULTS_DIR)
+        except Exception as e:
+            import traceback; print(f'  ERROR in pooled resting: {e}'); traceback.print_exc()
 
     print('\nDone.')
 

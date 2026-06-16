@@ -30,10 +30,9 @@ import mne
 import numpy as np
 import pandas as pd
 from antropy import lziv_complexity as _lziv, perm_entropy as _perm_entropy
-from scipy.signal import find_peaks
-from sklearn.cluster import KMeans
 
 from .io import first_paradigm_onset
+from .microstates import backfit_microstates, fit_microstate_templates
 from .preprocessing import load_filtered_eeg
 
 STATS_SENTINEL = 'metadata.json'
@@ -75,36 +74,15 @@ def _complexity_measures(rest_data: np.ndarray) -> tuple[float, float, list[floa
 
 def _microstates(rest_data: np.ndarray, sfreq: float, k: int = 4,
                  max_peaks: int = 3000, seed: int = 45) -> dict | None:
-    gfp = rest_data.std(axis=0)
-    peaks, _ = find_peaks(gfp)
-    if len(peaks) < k * 20:
+    fit = fit_microstate_templates(rest_data, k=k, max_peaks=max_peaks, seed=seed)
+    if fit is None:
         return None
-
-    rng = np.random.default_rng(seed)
-    if len(peaks) > max_peaks:
-        peaks = np.sort(rng.choice(peaks, size=max_peaks, replace=False))
-
-    maps = rest_data[:, peaks].T                                  # (n_peaks, n_ch)
-    maps = maps / (np.linalg.norm(maps, axis=1, keepdims=True) + 1e-30)
-
-    # Polarity alignment: flip each map so its correlation with the first is >= 0.
-    # The EEG topography and its sign-flip represent the same microstate
-    # (the underlying generator has not changed, only the reference polarity).
-    signs = np.sign(maps @ maps[0])
-    signs[signs == 0] = 1.0
-    maps_aligned = maps * signs[:, None]
-
-    km = KMeans(n_clusters=k, n_init=10, random_state=seed)
-    km.fit(maps_aligned)
-    centers = km.cluster_centers_
-    centers = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-30)
+    centers, n_peaks_used = fit
 
     # Back-fit every sample to the class with the largest |spatial correlation|
     # (sign-invariant — a microstate and its polarity inversion are the same class).
-    data_norm = rest_data / (np.linalg.norm(rest_data, axis=0, keepdims=True) + 1e-30)
-    corr = centers @ data_norm                                    # (k, n_times)
-    assign = np.argmax(np.abs(corr), axis=0)                      # (n_times,)
-    gev = float(np.mean(np.max(corr ** 2, axis=0)))               # global explained variance
+    assign, corr2 = backfit_microstates(rest_data, centers)
+    gev = float(corr2.mean())                                     # global explained variance
 
     stats = []
     rest_dur_s = rest_data.shape[1] / sfreq
@@ -128,7 +106,7 @@ def _microstates(rest_data: np.ndarray, sfreq: float, k: int = 4,
         })
 
     return {'centers': centers, 'assign': assign, 'gev': gev, 'stats': stats,
-            'n_peaks_used': int(len(peaks))}
+            'n_peaks_used': n_peaks_used}
 
 
 # ── 4: weighted Symbolic Mutual Information (wSMI) ───────────────────────────

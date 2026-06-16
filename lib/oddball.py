@@ -39,6 +39,7 @@ import joblib
 
 from .io import DEFAULT_EEG_CHANNELS, _crop_to_paradigm
 from .preprocessing import load_filtered_eeg
+from .microstates import fit_microstate_templates, microstate_epoch_features
 
 DEFAULT_N_PERMS = 1000
 STATS_SENTINEL  = 'metadata.json'
@@ -1271,6 +1272,90 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         except Exception as _e:
             print(f'  [oddball] LZc skipped: {_e}')
 
+    # ── EEG microstates (P3b window, rare vs standard) ──────────────────────────────
+    # Fits k=4 polarity-invariant microstate templates on pooled, +/-200uV-clipped
+    # epoch data (same primitives as the resting-state summary and the command-following
+    # 'micro' feature set), then back-fits each epoch restricted to the P3b window
+    # (300-600 ms) and compares 6 per-epoch features (4 class coverage fractions, mean
+    # GEV, transition rate) between rare and standard tones via a two-sided permutation
+    # test per feature, Bonferroni-corrected for 6 comparisons (p < 0.0083). Classes are
+    # data-driven clusters, not canonical A/B/C/D templates -- see lib/microstates.py.
+    microstate_result = None
+    if not plots_only:
+        try:
+            if len(epochs['rare']) >= 4 and len(epochs['standard']) >= 4:
+                MS_CLIP_V = 200e-6
+                data_clipped = np.clip(epochs_data, -MS_CLIP_V, MS_CLIP_V)
+                pooled = np.concatenate(data_clipped, axis=1)
+                fit = fit_microstate_templates(pooled, k=4)
+                if fit is not None:
+                    centers, n_peaks_used = fit
+                    p3b_win = (t_ep >= COMPONENTS['P3b']['win'][0]) & (t_ep <= COMPONENTS['P3b']['win'][1])
+                    X_ms = np.array([
+                        microstate_epoch_features(ep[:, p3b_win], centers, sfreq)
+                        for ep in data_clipped
+                    ])
+                    FEATURE_NAMES = ['coverage_0', 'coverage_1', 'coverage_2', 'coverage_3',
+                                     'gev', 'transitions']
+                    rng_ms    = np.random.default_rng(54)
+                    perms_ms  = np.array([rng_ms.permutation(labels) for _ in range(N_PERMS)])
+                    bonf_alpha = 0.05 / len(FEATURE_NAMES)
+                    ms_features = {}
+                    for fi, fname in enumerate(FEATURE_NAMES):
+                        vals      = X_ms[:, fi]
+                        rare_vals = vals[labels == 2]
+                        std_vals  = vals[labels == 1]
+                        obs  = float(rare_vals.mean() - std_vals.mean())
+                        null = np.array([
+                            vals[perms_ms[pi] == 2].mean() - vals[perms_ms[pi] == 1].mean()
+                            for pi in range(N_PERMS)
+                        ])
+                        p = float(np.mean(np.abs(null) >= abs(obs)))
+                        ms_features[fname] = {'rare': float(rare_vals.mean()), 'standard': float(std_vals.mean()),
+                                               'obs_diff': obs, 'p_value': p}
+
+                    n_sig = sum(1 for f in ms_features.values() if f['p_value'] < bonf_alpha)
+                    microstate_result = {
+                        'n_peaks_used':     n_peaks_used,
+                        'n_rare':           int((labels == 2).sum()),
+                        'n_std':            int((labels == 1).sum()),
+                        'bonferroni_alpha': bonf_alpha,
+                        'n_significant':    n_sig,
+                        'features':         ms_features,
+                    }
+                    print(f'  [oddball] Microstates (300-600 ms): {n_sig}/6 features '
+                          f'significant at p<{bonf_alpha:.4f}')
+                    for fname, fres in ms_features.items():
+                        print(f'    {fname}: rare={fres["rare"]:.3f}  standard={fres["standard"]:.3f}  '
+                              f'diff={fres["obs_diff"]:+.3f}  p={fres["p_value"]:.3f}')
+
+                    fig_ms, axes_ms = plt.subplots(2, 3, figsize=(12, 7))
+                    PANEL_LABELS = ['Class 0 coverage', 'Class 1 coverage', 'Class 2 coverage',
+                                    'Class 3 coverage', 'Mean GEV', 'Transition rate (/s)']
+                    for fi, (ax_ms, fname, label) in enumerate(zip(axes_ms.flat, FEATURE_NAMES, PANEL_LABELS)):
+                        vals = X_ms[:, fi]
+                        ax_ms.boxplot([vals[labels == 2], vals[labels == 1]],
+                                      tick_labels=['Rare', 'Standard'], patch_artist=True,
+                                      boxprops=dict(facecolor='#16a085', alpha=0.7),
+                                      medianprops=dict(color='k', lw=2), showfliers=False)
+                        fres = ms_features[fname]
+                        sig_str = ' *' if fres['p_value'] < bonf_alpha else ''
+                        ax_ms.set_title(f'{label}\np={fres["p_value"]:.3f}{sig_str}', fontsize=10)
+                        ax_ms.grid(True, alpha=0.3, axis='y')
+                    fig_ms.suptitle(
+                        f'{subject_id}: EEG Microstates, Rare vs Standard (300–600 ms P3b window)\n'
+                        f'k=4 polarity-aligned k-means on pooled epoch GFP peaks (n={n_peaks_used} peaks)\n'
+                        f'Bonferroni threshold p<{bonf_alpha:.4f} (* = significant); '
+                        f'data-driven classes, not canonical A/B/C/D',
+                        fontsize=10)
+                    plt.tight_layout(rect=[0, 0, 1, 0.88])
+                    fig_ms.savefig(out_dir / f'{subject_id}_oddball_microstates.png', dpi=150)
+                    plt.close(fig_ms)
+                else:
+                    print(f'  [oddball] Microstates skipped: too few GFP peaks for stable clustering')
+        except Exception as _e:
+            print(f'  [oddball] Microstates skipped: {_e}')
+
     # Johnsen band-power reactivity
     # raw_p300 and all_events are local to _build_oddball_evoked; reconstruct here.
     # Filtering is fast; epochs.events carries the same event array already sorted.
@@ -1371,6 +1456,7 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         'alpha_corr_result':  alpha_corr_result,
         'pac_result':         pac_result,
         'lzc_result':         lzc_result,
+        'microstate_result':  microstate_result,
     }
     if not plots_only:
         with open(out_dir / 'metadata.json', 'w') as f:

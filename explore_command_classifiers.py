@@ -16,6 +16,8 @@ Feature sets:
     csp       — Common Spatial Patterns log-variance
     ts        — Riemannian tangent-space vector (covariance -> Euclidean vector)
     tfr       — Morlet wavelet power, motor channels, time-resolved
+    micro     — EEG microstate coverage/GEV/transition-rate per sub-epoch
+                (session-specific templates fit on pooled command sub-epochs)
 
 Classifiers: LinearSVC, LogisticRegression, and shrinkage LDA (all
 RobustScaler-scaled) and RandomForestClassifier, plus the existing
@@ -70,6 +72,7 @@ ANALYSIS_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ANALYSIS_ROOT))
 
 from lib.command import build_command_subepochs
+from lib.microstates import fit_microstate_templates, microstate_epoch_features
 from run_all import RESULTS_DIR, discover_sessions, has_paradigm, load_session
 
 mne.set_log_level('WARNING')
@@ -90,6 +93,7 @@ COMBOS = [
     ('csp', 'svm'), ('csp', 'rf'), ('csp', 'lr'), ('csp', 'lda'),
     ('ts',  'svm'), ('ts',  'rf'), ('ts',  'lr'), ('ts',  'lda'),
     ('tfr', 'svm'), ('tfr', 'rf'), ('tfr', 'lr'), ('tfr', 'lda'),
+    ('micro', 'svm'), ('micro', 'rf'), ('micro', 'lr'), ('micro', 'lda'),
     ('cov', 'mdm'),
 ]
 CLASSIFIER_COLOR = {
@@ -126,6 +130,10 @@ COMBO_LABEL = {
     ('tfr', 'rf'):  'Wavelet/TFR\nRandom Forest',
     ('tfr', 'lr'):  'Wavelet/TFR\nLogistic Regression',
     ('tfr', 'lda'): 'Wavelet/TFR\nShrinkage LDA',
+    ('micro', 'svm'): 'Microstates\nLinear SVM',
+    ('micro', 'rf'):  'Microstates\nRandom Forest',
+    ('micro', 'lr'):  'Microstates\nLogistic Regression',
+    ('micro', 'lda'): 'Microstates\nShrinkage LDA',
     ('cov', 'mdm'): 'Covariance\nRiemannian MDM',
 }
 COMBO_LABEL_COMPACT = {k: v.replace('\n', ' - ') for k, v in COMBO_LABEL.items()}
@@ -196,6 +204,24 @@ def _extract_mu_beta_ratio_features(X_psd, ch_names, motor_channels, SVM_BAND_LA
     mu   = X_psd[:, [mu_idx   * n_ch + ci for ci in motor_idx]]
     beta = X_psd[:, [beta_idx * n_ch + ci for ci in motor_idx]]
     return mu - beta
+
+
+def _extract_microstate_features(data_sub, sfreq, k=4):
+    """Per-sub-epoch microstate coverage/GEV/transition-rate features.
+
+    Templates are fit once per patient on the pooled, clipped sub-epoch data
+    (all keep+stop sub-epochs concatenated), so they represent the topographic
+    repertoire actually present during the command-following task. Each
+    sub-epoch is then back-fit to those shared templates independently.
+    Returns None if there are too few GFP peaks for stable clustering.
+    """
+    data_clipped = np.clip(data_sub, -CLIP_V, CLIP_V)
+    pooled = np.concatenate(data_clipped, axis=1)  # (n_ch, n_sub_epochs * n_samples)
+    fit = fit_microstate_templates(pooled, k=k)
+    if fit is None:
+        return None
+    centers, _ = fit
+    return np.array([microstate_epoch_features(ep, centers, sfreq) for ep in data_clipped])
 
 
 def bootstrap_auc_ci(y, scores, groups, n_boot=N_BOOT, seed=0, ci=95):
@@ -271,6 +297,9 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
         sub_sides = built.keep_meta_df['side'].values[groups]
         X_lat = _extract_laterality_features(X_psd, ch_names, sub_sides, n_bands)
 
+    X_micro = _extract_microstate_features(data_sub, sfreq)
+    has_micro = X_micro is not None
+
     cov_sub = None
     if HAS_PYRIEMANN:
         cov_sub = Covariances(estimator='lwf').fit_transform(np.clip(data_sub, -CLIP_V, CLIP_V))
@@ -287,6 +316,8 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
         _fit_classifiers(oof, 'ratio', X_ratio[train_idx], X_ratio[test_idx], test_idx, y_tr)
         if has_lat:
             _fit_classifiers(oof, 'lat', X_lat[train_idx], X_lat[test_idx], test_idx, y_tr)
+        if has_micro:
+            _fit_classifiers(oof, 'micro', X_micro[train_idx], X_micro[test_idx], test_idx, y_tr)
 
         csp = CSP(n_components=CSP_COMPONENTS, reg='ledoit_wolf', log=True, norm_trace=False)
         Xtr_csp = csp.fit_transform(data_sub[train_idx], y_tr)
@@ -308,6 +339,7 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
         'csp': CSP_COMPONENTS,
         'ts':  cov_sub.shape[1] * (cov_sub.shape[1] + 1) // 2 if cov_sub is not None else None,
         'tfr': X_tfr.shape[1], 'cov': cov_sub.shape[1] if cov_sub is not None else None,
+        'micro': X_micro.shape[1] if has_micro else None,
     }
 
     rows = []
@@ -316,6 +348,8 @@ def run_comparison_for_patient(pid, raw, sfreq, available_eeg, df, out_dir,
         if feat in ('ts', 'cov') and not HAS_PYRIEMANN:
             continue
         if feat == 'lat' and not has_lat:
+            continue
+        if feat == 'micro' and not has_micro:
             continue
         scores = oof[name]
         auc = roc_auc_score(y, scores)
@@ -381,15 +415,37 @@ def _plot_patient_comparison(pid, df_results, out_dir, n_groups):
     plt.close(fig)
 
 
-def _plot_summary_heatmap(all_results, out_path):
+_HEATMAP_GROUPS = [
+    # (page subtitle, feature families on this page)
+    ('Band Power • Motor Band Power • C3-C4 Laterality • Mu/Beta Ratio',
+     ('psd', 'psd_motor', 'lat', 'ratio')),
+    ('CSP • Tangent Space • Wavelet/TFR • Microstates • Riemannian MDM',
+     ('csp', 'ts', 'tfr', 'micro', 'cov')),
+]
+
+
+def _plot_summary_heatmap(all_results, out_path, combos_subset=None, subtitle=''):
+    """Render the cross-patient AUC heatmap.
+
+    combos_subset -- list of (feature, classifier) tuples; defaults to all COMBOS.
+    Saves to out_path.  Also saves split versions (*_1.png, *_2.png) when
+    combos_subset is None (i.e. the full combined call).
+    """
+    if combos_subset is None:
+        # First save the two readable split pages, then fall through to save the
+        # combined overview as well (for direct PNG inspection).
+        p = Path(out_path)
+        for i, (sub, families) in enumerate(_HEATMAP_GROUPS, 1):
+            subset = [(f, c) for f, c in COMBOS if f in families]
+            split_path = p.parent / f'{p.stem}_{i}{p.suffix}'
+            _plot_summary_heatmap(all_results, split_path, subset, subtitle=sub)
+        combos_subset = COMBOS
+
     pivot = all_results.pivot(index='patient_id',
                                columns=['feature', 'classifier'], values='auc')
     pval  = all_results.pivot(index='patient_id',
                                columns=['feature', 'classifier'], values='p_value')
-    col_order = [(f, c) for f, c in COMBOS if (f, c) in pivot.columns]
-    # Transpose: feature x classifier combos as rows, patients as columns --
-    # 17 rows x 5 columns is much closer to the page's available aspect ratio
-    # than 5 rows x 17 columns, so the rendered figure fills far more of the page.
+    col_order = [(f, c) for f, c in combos_subset if (f, c) in pivot.columns]
     pivot = pivot[col_order].T
     pval  = pval[col_order].T
 
@@ -405,8 +461,10 @@ def _plot_summary_heatmap(all_results, out_path):
             star = '*' if p < 0.05 else ''
             ax.text(j, i, f'{v:.2f}{star}', ha='center', va='center', fontsize=11)
     plt.colorbar(im, ax=ax, label='LOGO-CV AUC', fraction=0.04, pad=0.02)
-    ax.set_title('Command-following decoding: AUC by feature x classifier\n'
-                  '(* = permutation p < 0.05)')
+    title = 'Command-following decoding: AUC by feature x classifier\n(* = permutation p < 0.05)'
+    if subtitle:
+        title += f'\n{subtitle}'
+    ax.set_title(title)
     plt.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

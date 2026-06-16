@@ -388,6 +388,29 @@ ANALYSES = {
                 ],
             },
             {
+                'suffix': '_oddball_microstates.png',
+                'title':  'EEG Microstates: Rare vs. Standard (300-600 ms P3b Window)',
+                'description': (
+                    'Each epoch is reduced to six features describing the brain\'s whole-scalp '
+                    'voltage pattern during the P3b window (300-600 ms): the fraction of time '
+                    'spent in each of four recurring patterns ("microstates"), how well the '
+                    'signal matches its assigned pattern on average (global explained variance, '
+                    'GEV), and how often the pattern switches per second. The four patterns are '
+                    'fitted per patient from this session\'s own data and are data-driven '
+                    'clusters, not the canonical A/B/C/D templates from the literature. Rare and '
+                    'standard tones are compared on each feature by permutation test, '
+                    'Bonferroni-corrected for the six comparisons (p < 0.0083, marked with *).'
+                ),
+                'citations': [
+                    'Lehmann, D. et al. (1987). EEG alpha map series: brain micro-states by '
+                    'space-oriented adaptive segmentation. Electroencephalography and Clinical '
+                    'Neurophysiology, 67(3), 271-288.',
+                    'Michel, C. M. and Koenig, T. (2018). EEG microstates as a tool for studying '
+                    'the temporal dynamics of whole-brain neuronal networks: A review. '
+                    'NeuroImage, 180, 577-593.',
+                ],
+            },
+            {
                 'suffix': '_oddball_xdawn_null.png',
                 'title':  'XDAWN + Riemannian MDM: P300-Specific Classifier',
                 'description': (
@@ -497,6 +520,11 @@ ANALYSES = {
              'Borrowed from data compression: a more varied, less repetitive EEG signal '
              'compresses less and scores higher. Captures single-trial richness that '
              'disappears once trials are averaged together.'),
+            ('EEG microstates',
+             'Brief (tens of milliseconds), recurring whole-scalp voltage patterns. Each '
+             'epoch\'s P3b window (300-600 ms) is summarised by how much time it spends in '
+             'each pattern, how well it matches its assigned pattern (GEV), and how often '
+             'the pattern switches -- six features compared between rare and standard tones.'),
         ],
     },
 
@@ -1012,15 +1040,20 @@ ANALYSES = {
             'each patient is held out exactly once. Performance well above chance is the '
             'bar a tool must clear before it could be used on a new patient without '
             'per-patient calibration.\n\n'
-            'Two paradigms are pooled across five patients (CON010, CON012, CON013, '
-            'CON014, CON015):\n\n'
+            'Three sections pool data across the same five patients (CON010, CON012, '
+            'CON013, CON014, CON015):\n\n'
             'Oddball P300 uses an XDAWN+MDM Riemannian-geometry classifier on '
             'single-trial epochs (rare vs standard tone). Command following compares '
             'eight feature-extraction/classifier combinations (keep vs stop, motor '
             'imagery), including three EEGNet variants -- compact convolutional '
-            'neural networks trained directly on raw multi-channel EEG.\n\n'
-            'Both sections are exploratory cross-patient checks and do not change the '
-            'per-patient results reported elsewhere.'
+            'neural networks trained directly on raw multi-channel EEG. Resting-state '
+            'microstates is a different kind of comparison: rather than LOPO '
+            'classification, it lines up each patient\'s resting-state microstate '
+            'summary (computed independently in the resting-state report) alongside '
+            'their oddball and command-following results, to look for any visible '
+            'relationship between resting-state structure and task-evoked findings.\n\n'
+            'All three sections are exploratory cross-patient checks and do not change '
+            'the per-patient results reported elsewhere.'
         ),
         'glossary': [
             ('Leave-one-patient-out (LOPO) cross-validation',
@@ -1073,6 +1106,15 @@ ANALYSES = {
              'each fold\'s training patients\' oddball P300 epochs -- a '
              'substantially larger pool of trials -- before fine-tuning on '
              'command-following data, a cross-paradigm transfer-learning approach.'),
+            ('Microstate GEV, duration, and coverage entropy',
+             'Three single-number summaries of a patient\'s resting-state microstate '
+             'analysis (see the Resting-State EEG report for the full per-class '
+             'breakdown). GEV (global explained variance) is how well four '
+             'data-driven scalp patterns summarise the whole recording. Duration is '
+             'the average length of a microstate segment, weighted by how often each '
+             'pattern occurred. Coverage entropy (0-1) measures whether time is '
+             'spread evenly across all four patterns (1) or dominated by one or two '
+             '(0).'),
         ],
         'sections': [
             {
@@ -1245,6 +1287,75 @@ ANALYSES = {
                             'Lawhern, V. J. et al. (2018). EEGNet: a compact convolutional '
                             'neural network for EEG-based brain-computer interfaces. '
                             'Journal of Neural Engineering, 15(5), 056013.',
+                        ],
+                    },
+                ],
+            },
+            {
+                'dir': 'resting',
+                'section_title': 'Resting-State Microstates: Cross-Patient Comparison',
+                'header_label': 'Pooled: Microstates',
+                'overview': (
+                    'The resting-state report computes each patient\'s EEG microstate '
+                    'profile independently (see Methods Glossary above for GEV, '
+                    'duration, and coverage entropy). This section places those five '
+                    'profiles side by side and lines them up against each patient\'s '
+                    'oddball Fischer score and command-following SVM AUC, to look for '
+                    'any visible relationship between resting-state brain-state '
+                    'dynamics and the task-evoked findings reported elsewhere.\n\n'
+                    'With only five analysable patients, no correlation or '
+                    'significance test is computed -- the figures below are a '
+                    'descriptive cohort summary, not a hypothesis test. A visible '
+                    'pattern here would motivate a more rigorous comparison in a '
+                    'larger cohort; the absence of one is not evidence against a '
+                    'relationship at this sample size.'
+                ),
+                'figures': [
+                    {
+                        'suffix': 'pooled_microstate_summary.png',
+                        'title':  'Cohort Summary: Microstate GEV, Duration, and Diversity',
+                        'description': (
+                            'Each patient\'s three resting-state microstate summary '
+                            'numbers, side by side. Left: global explained variance -- '
+                            'how well four data-driven scalp patterns account for the '
+                            'whole recording. Centre: the average duration of a '
+                            'microstate segment, weighted by how often each pattern '
+                            'occurred -- shorter durations mean the brain switches '
+                            'between patterns more rapidly. Right: coverage entropy -- '
+                            'whether time is spread evenly across all four patterns '
+                            '(near 1) or concentrated in one or two (near 0). This '
+                            'panel is purely descriptive; no normative reference range '
+                            'is available for this analysis pipeline.'
+                        ),
+                        'citations': [
+                            'Lehmann, D. et al. (1987). EEG alpha map series: brain '
+                            'micro-states by space-oriented adaptive segmentation. '
+                            'Electroencephalography and Clinical Neurophysiology, '
+                            '67(3), 271-288.',
+                            'Michel, C. M. and Koenig, T. (2018). EEG microstates as a '
+                            'tool for studying the temporal dynamics of whole-brain '
+                            'neuronal networks: A review. NeuroImage, 180, 577-593.',
+                        ],
+                    },
+                    {
+                        'suffix': 'pooled_microstate_vs_outcomes.png',
+                        'title':  'Microstate GEV vs Task-Evoked Findings',
+                        'description': (
+                            'Left: each patient\'s microstate GEV against their '
+                            'oddball Fischer hierarchy score (0-4). Right: the same '
+                            'GEV against their command-following SVM AUC, with the '
+                            'chance line (0.5) for reference. Each point is one '
+                            'patient\'s resting-state recording compared with their '
+                            'own task-evoked results from the oddball and '
+                            'command-following reports. With five points, any '
+                            'apparent trend is illustrative only -- it is not a '
+                            'statistical claim about whether resting-state structure '
+                            'predicts task-evoked findings.'
+                        ),
+                        'citations': [
+                            'Della Bella, G. et al. (2025). EEG-based assessment of '
+                            'disorders of consciousness: a multicentre study. '
+                            'Communications Biology.',
                         ],
                     },
                 ],
@@ -1548,6 +1659,10 @@ def _metadata_note(md: dict) -> str:
     lzc = md.get('lzc_result')
     if lzc:
         parts.append(f'Lempel-Ziv complexity: diff={lzc["obs_diff"]:+.4f}  p={lzc["p_value"]:.3f}.')
+    ms = md.get('microstate_result')
+    if ms:
+        parts.append(f'Microstates (300-600 ms): {ms["n_significant"]}/6 features significant '
+                      f'at p<{ms["bonferroni_alpha"]:.4f}.')
     return '  '.join(parts)
 
 
@@ -1646,6 +1761,11 @@ _COMPARISON_GLOSSARY = [
      'bands, computed separately for four consecutive bins within each 2-second '
      'sub-epoch -- captures when within the window the power changes, rather than '
      'only the average.'),
+    ('Microstate features',
+     'Each 2-second sub-epoch is reduced to 6 features describing whole-brain '
+     'dynamics: the fraction of time spent in each of four recurring scalp-wide '
+     'voltage patterns ("microstates", clustered per patient), how well it '
+     'matches its assigned pattern, and how often the pattern switches.'),
     ('Random Forest',
      "An ensemble of 200 decision trees, each trained on a random subset of the "
      "data; the forest's prediction is the average across trees. Compared here "
@@ -1679,24 +1799,45 @@ _COMPARISON_CITATIONS = [
     'Breiman, L. (2001). Random forests. Machine Learning, 45(1), 5-32.',
     'Claassen, J. et al. (2019). Detection of brain activation in unresponsive '
     'patients with acute brain injury. NEJM, 380(26), 2497-2505.',
+    'Lehmann, D. et al. (1987). EEG alpha map series: brain micro-states by '
+    'space-oriented adaptive segmentation. Electroencephalography and '
+    'Clinical Neurophysiology, 67(3), 271-288.',
+    'Michel, C. M. and Koenig, T. (2018). EEG microstates as a tool for '
+    'studying the temporal dynamics of whole-brain neuronal networks: A '
+    'review. NeuroImage, 180, 577-593.',
 ]
 
-_COMPARISON_HEATMAP_FIG = {
-    'title': 'Feature x Classifier Comparison Across All Patients',
+_COMPARISON_HEATMAP_FIG_1 = {
+    'title': 'Feature x Classifier Comparison Across All Patients (1 of 2)',
     'description': (
         'Each cell shows the leave-one-group-out cross-validated AUC for one '
         'feature-extraction/classifier combination (rows) for one patient (columns), '
         'colour-scaled from 0.4 (red, near or below chance) to 0.85 (green, strong '
         'separation). An asterisk marks combinations with a permutation p-value '
-        'below 0.05. The same twenty-nine combinations and the identical 48 trial-pairs / '
-        'cross-validation scheme are used for every patient, matching the '
-        'per-patient comparison charts that follow -- this summary makes it '
-        'possible to see whether any feature-extraction method or classifier is '
-        'consistently stronger or weaker across the five analysable patients, or '
-        'whether the ranking is patient-specific.'
+        'below 0.05. This page covers the four simpler feature families: '
+        'Band Power (all 19 channels), Motor Band Power (C3/Cz/C4 only), '
+        'C3-C4 Laterality, and Mu/Beta Ratio -- each paired with all four classifiers. '
+        'The same 48 trial-pairs and leave-one-group-out cross-validation scheme are '
+        'used for every combination and every patient. Page 2 of 2 shows the remaining '
+        'feature families (CSP, Tangent Space, Wavelet/TFR, Microstates, Riemannian MDM).'
     ),
     'citations': _COMPARISON_CITATIONS,
 }
+
+_COMPARISON_HEATMAP_FIG_2 = {
+    'title': 'Feature x Classifier Comparison Across All Patients (2 of 2)',
+    'description': (
+        'Continuation of the cross-patient AUC heatmap. This page covers the '
+        'four more complex feature families: Common Spatial Patterns (CSP), '
+        'Riemannian Tangent Space, Wavelet/TFR, and Microstates -- each paired '
+        'with all four classifiers -- plus the Covariance + Riemannian MDM combination. '
+        'Colour scale and cross-validation scheme are identical to page 1 of 2.'
+    ),
+    'citations': [],
+}
+
+# Combined single-page version kept for backward compat (direct PNG inspection).
+_COMPARISON_HEATMAP_FIG = _COMPARISON_HEATMAP_FIG_1
 
 _COMPARISON_BARCHART_FIG = {
     'title': 'This Patient\'s Comparison: Feature x Classifier AUC',
@@ -1704,15 +1845,16 @@ _COMPARISON_BARCHART_FIG = {
         'The same keep-vs-stop decoding task as the production classifiers shown '
         'earlier in each patient\'s section -- identical 48 trial-pairs, identical '
         '2-second sub-epochs, identical leave-one-group-out cross-validation -- '
-        'repeated with twenty-nine combinations of feature-extraction method and '
+        'repeated with thirty-three combinations of feature-extraction method and '
         'classifier (see glossary above). "Band Power - Linear SVM" uses the same '
         'features as the production SVM; "Covariance - Riemannian MDM" is the same '
-        'classifier as the production Riemannian result. The remaining twenty-seven '
-        'combinations pair each of seven feature sets -- Band Power, Motor Band '
-        'Power, C3-C4 Laterality, Mu/Beta Ratio, CSP, Tangent Space, and Wavelet/TFR '
-        '-- with a linear SVM, a Random Forest, a Logistic Regression, and a '
-        'Shrinkage LDA (28 pairings, minus the Band Power - Linear SVM combination '
-        'already named above) -- are additional, exploratory methods. '
+        'classifier as the production Riemannian result. The remaining thirty-one '
+        'combinations pair each of eight feature sets -- Band Power, Motor Band '
+        'Power, C3-C4 Laterality, Mu/Beta Ratio, CSP, Tangent Space, Wavelet/TFR, '
+        'and Microstates -- with a linear SVM, a Random Forest, a Logistic '
+        'Regression, and a Shrinkage LDA (32 pairings, minus the Band Power - '
+        'Linear SVM combination already named above) -- are additional, '
+        'exploratory methods. '
         'Error bars are 95% bootstrap confidence intervals from resampling the 48 '
         'trial-pairs (2,000 resamples); the number beside each bar is a permutation '
         'p-value from 200 label-shuffles. This is an exploratory methodology '
@@ -1742,11 +1884,20 @@ def feature_comparison_section(p: FPDF, cit_to_num: dict, patients: dict) -> Non
     _rule(p, y); y += 0.16
     for term, definition in _COMPARISON_GLOSSARY:
         y += _txt(p, MARGIN, y, term, size=10, style='B') + 0.02
-        y += _wrap_txt(p, MARGIN, y, definition, size=9, line_spacing=1.35) + 0.10
+        y += _wrap_txt(p, MARGIN, y, definition, size=9, line_spacing=1.2) + 0.08
 
-    nums = [cit_to_num[c] for c in _fig_citations(_COMPARISON_HEATMAP_FIG) if c in cit_to_num]
-    figure_page(p, heatmap_path, 'All Patients', _COMPARISON_HEATMAP_FIG, citation_nums=nums,
-                header_label='Feature & Classifier Comparison (Exploratory)')
+    hm1 = RESULTS_DIR / 'feature_comparison_heatmap_1.png'
+    hm2 = RESULTS_DIR / 'feature_comparison_heatmap_2.png'
+    if hm1.exists() and hm2.exists():
+        nums1 = [cit_to_num[c] for c in _fig_citations(_COMPARISON_HEATMAP_FIG_1) if c in cit_to_num]
+        figure_page(p, hm1, 'All Patients', _COMPARISON_HEATMAP_FIG_1, citation_nums=nums1,
+                    header_label='Feature & Classifier Comparison (Exploratory)')
+        figure_page(p, hm2, 'All Patients', _COMPARISON_HEATMAP_FIG_2, citation_nums=[],
+                    header_label='Feature & Classifier Comparison (Exploratory)')
+    else:
+        nums = [cit_to_num[c] for c in _fig_citations(_COMPARISON_HEATMAP_FIG) if c in cit_to_num]
+        figure_page(p, heatmap_path, 'All Patients', _COMPARISON_HEATMAP_FIG, citation_nums=nums,
+                    header_label='Feature & Classifier Comparison (Exploratory)')
 
     nums = [cit_to_num[c] for c in _fig_citations(_COMPARISON_BARCHART_FIG) if c in cit_to_num]
     items = []
