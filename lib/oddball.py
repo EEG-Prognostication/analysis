@@ -157,7 +157,8 @@ def _save_n1_bandwidth_comparison(raw, available_eeg, df, out_dir, subject_id: s
     std_df = odd_df[odd_df['notes'] == 'standard_tone']
     if rare_df.empty or std_df.empty:
         return
-    if 'Cz' not in available_eeg:
+    n1_roi = [c for c in ['Fz', 'Cz'] if c in available_eeg]
+    if not n1_roi:
         return
 
     rare_events = np.column_stack([
@@ -194,10 +195,12 @@ def _save_n1_bandwidth_comparison(raw, available_eeg, df, out_dir, subject_id: s
         evoked_rare = epochs_band['rare'].average()
         evoked_std = epochs_band['standard'].average()
         diff_evoked = mne.combine_evoked([evoked_rare, evoked_std], weights=[1, -1])
-        cz_idx = evoked_rare.ch_names.index('Cz')
-        rare_uv = evoked_rare.data[cz_idx] * 1e6
-        std_uv = evoked_std.data[cz_idx] * 1e6
-        diff_uv = diff_evoked.data[cz_idx] * 1e6
+        avail_roi   = [c for c in n1_roi if c in evoked_rare.ch_names]
+        roi_idxs    = [evoked_rare.ch_names.index(c) for c in avail_roi]
+        roi_label   = '+'.join(avail_roi)
+        rare_uv = evoked_rare.data[roi_idxs].mean(axis=0) * 1e6
+        std_uv  = evoked_std.data[roi_idxs].mean(axis=0)  * 1e6
+        diff_uv = diff_evoked.data[roi_idxs].mean(axis=0) * 1e6
 
         ax.plot(evoked_rare.times * 1000, std_uv, color='steelblue', lw=1.5, label='Standard')
         ax.plot(evoked_rare.times * 1000, rare_uv, color='firebrick', lw=1.5, label='Rare')
@@ -206,13 +209,13 @@ def _save_n1_bandwidth_comparison(raw, available_eeg, df, out_dir, subject_id: s
         ax.axvline(0, color='k', lw=0.8, ls=':')
         ax.axhline(0, color='k', lw=0.5)
         ax.set_ylabel('µV')
-        ax.set_title(f'Cz [{band_label}]', fontsize=11)
+        ax.set_title(f'{roi_label} avg [{band_label}]', fontsize=11)
         ax.legend(loc='upper right', fontsize=8)
         ax.grid(True, alpha=0.3)
 
     axes[-1].set_xlabel('Time (ms)')
     fig.suptitle(
-        f'{subject_id}: N1 at Cz — Rare minus Standard across bandwidths',
+        f'{subject_id}: N1 ROI ({roi_label} avg) — Rare minus Standard across bandwidths',
         fontsize=13
     )
     plt.tight_layout()
@@ -315,7 +318,8 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
         # N1 uses source='standard': sign-flip test on standard-tone evoked amplitude.
         # N1 is obligatory (both tones drive it equally), so rare-standard difference
         # cancels out — the meaningful test is whether the standard average is negative.
-        'N1':  {'win': (0.050, 0.100), 'ch': 'Cz', 'sign': -1, 'label': 'Primary auditory response', 'source': 'standard'},
+        # 'chs' triggers ROI averaging across the listed channels; 'ch' is the display label.
+        'N1':  {'win': (0.050, 0.100), 'ch': 'Fz+Cz', 'chs': ['Fz', 'Cz'], 'sign': -1, 'label': 'Primary auditory response', 'source': 'standard'},
         'MMN': {'win': (0.100, 0.200), 'ch': 'Fz', 'sign': -1, 'label': 'Automatic mismatch',        'source': 'diff'},
         'P3a': {'win': (0.200, 0.300), 'ch': 'Cz', 'sign': +1, 'label': 'Automatic orienting',       'source': 'diff'},
         'P3b': {'win': (0.300, 0.600), 'ch': 'Pz', 'sign': +1, 'label': 'Conscious updating (P300)', 'source': 'diff'},
@@ -443,10 +447,20 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
 
         perm_results = {}
         for name, comp in COMPONENTS.items():
-            ch = comp['ch']
-            if ch not in epochs.ch_names:
-                continue
-            ch_idx   = epochs.ch_names.index(ch)
+            roi_chs = comp.get('chs')
+            if roi_chs is not None:
+                avail_roi = [c for c in roi_chs if c in epochs.ch_names]
+                if not avail_roi:
+                    continue
+                roi_idxs = [epochs.ch_names.index(c) for c in avail_roi]
+                ch_label = '+'.join(avail_roi)
+            else:
+                ch = comp['ch']
+                if ch not in epochs.ch_names:
+                    continue
+                roi_idxs = None
+                ch_label = ch
+
             win_mask = (t_ep >= comp['win'][0]) & (t_ep <= comp['win'][1])
             sign     = comp['sign']
             source   = comp.get('source', 'diff')
@@ -454,20 +468,34 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
             lp       = COMP_DISPLAY_LP[name]
             cd, _, _ = _lp_epochs(lp)
 
-            if source == 'standard':
-                per_epoch = cd[labels == 1, ch_idx][:, win_mask].mean(axis=1) * 1e6
-                obs  = float(per_epoch.mean())
-                null = np.array([(rng.choice([-1, 1], size=len(per_epoch)) * per_epoch).mean()
-                                 for _ in range(N_PERMS)])
+            if roi_idxs is not None:
+                if source == 'standard':
+                    per_epoch = cd[labels == 1][:, roi_idxs, :][:, :, win_mask].mean(axis=(1, 2)) * 1e6
+                    obs  = float(per_epoch.mean())
+                    null = np.array([(rng.choice([-1, 1], size=len(per_epoch)) * per_epoch).mean()
+                                     for _ in range(N_PERMS)])
+                else:
+                    def _amp_roi(data, labs, _idxs=roi_idxs, _win=win_mask):
+                        return (data[labs == 2][:, _idxs, :][:, :, _win].mean()
+                                - data[labs == 1][:, _idxs, :][:, :, _win].mean()) * 1e6
+                    obs  = _amp_roi(cd, labels)
+                    null = np.array([_amp_roi(cd, rng.permutation(labels)) for _ in range(N_PERMS)])
             else:
-                def _amp(data, labs, _ch=ch_idx, _win=win_mask):
-                    return (data[labs == 2, _ch][:, _win].mean()
-                            - data[labs == 1, _ch][:, _win].mean()) * 1e6
-                obs  = _amp(cd, labels)
-                null = np.array([_amp(cd, rng.permutation(labels)) for _ in range(N_PERMS)])
+                ch_idx = epochs.ch_names.index(ch_label)
+                if source == 'standard':
+                    per_epoch = cd[labels == 1, ch_idx][:, win_mask].mean(axis=1) * 1e6
+                    obs  = float(per_epoch.mean())
+                    null = np.array([(rng.choice([-1, 1], size=len(per_epoch)) * per_epoch).mean()
+                                     for _ in range(N_PERMS)])
+                else:
+                    def _amp(data, labs, _ch=ch_idx, _win=win_mask):
+                        return (data[labs == 2, _ch][:, _win].mean()
+                                - data[labs == 1, _ch][:, _win].mean()) * 1e6
+                    obs  = _amp(cd, labels)
+                    null = np.array([_amp(cd, rng.permutation(labels)) for _ in range(N_PERMS)])
 
             p = np.mean(null <= obs) if sign < 0 else np.mean(null >= obs)
-            perm_results[name] = {'obs': obs, 'null': null, 'p': p, 'ch': ch, 'comp': comp}
+            perm_results[name] = {'obs': obs, 'null': null, 'p': p, 'ch': ch_label, 'comp': comp}
 
         _fischer_names = ('N1', 'MMN', 'P3a', 'P3b')
         fischer_score = sum(1 for name, res in perm_results.items()
@@ -562,7 +590,7 @@ def run_oddball(subject_id: str, raw, sfreq: float, available_eeg: list, df: pd.
     #   P3a → Cz (primary) + Fz
     #   P3b → Pz (primary, positive) + Fz (expected negative — the dipole key)
     COMP_PLOT = {
-        'N1':  {'electrodes': ['Cz', 'T3', 'T4'], 'color': '#b0a0e0', 'alpha': 0.35},
+        'N1':  {'electrodes': ['Fz', 'Cz', 'T3', 'T4'], 'color': '#b0a0e0', 'alpha': 0.35},
         'MMN': {'electrodes': ['Fz', 'Cz'],        'color': '#4da6e8', 'alpha': 0.30},
         'P3a': {'electrodes': ['Cz', 'Fz'],        'color': '#4dc44d', 'alpha': 0.30},
         'P3b': {'electrodes': ['Pz', 'Fz'],        'color': '#f0b800', 'alpha': 0.35},
